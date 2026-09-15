@@ -161,6 +161,27 @@ class RepoRenameTests(unittest.TestCase):
         self.assertFalse(project.exists())
         self.assertEqual(json.loads((moved / "session.jsonl").read_text())["cwd"], new_path)
 
+    def test_explicit_local_state_updates_preserve_executable_mode(self) -> None:
+        files = ("PROMPT.md", "TODO.md", ".venv/bin/tool", ".cache/state")
+        for name in files:
+            target = self.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old-repo\n", encoding="utf-8")
+            target.chmod(0o755)
+        subprocess.run(["git", "add", "-f", *files], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixtures"], cwd=self.repo, check=True)
+        result = self.run_script("new-repo", "--dry-run", "--include-local-state")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["include_local_state"])
+        self.assertEqual(len(report["mutations"][-1]["files"]), 5)
+        result = self.run_script("new-repo", "--apply", "--include-local-state", "--confirm", "owner/old-repo->owner/new-repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in files:
+            target = self.root / "new-repo" / name
+            self.assertEqual(target.read_text(), "new-repo\n")
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
 
 if __name__ == "__main__":
     unittest.main()
