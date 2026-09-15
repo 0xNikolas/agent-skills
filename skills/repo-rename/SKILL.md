@@ -22,6 +22,8 @@ Preview the complete GitHub, Git, filesystem, and agent-continuity mutation set 
   does not apply to repos with no active transcripts.
 - Update constrained literal old-name references inside the repository, excluding VCS, dependencies, and generated build
   directories.
+- Skip `PROMPT.md`, `TODO.md`, and symlinks before reading replacement candidates; prune excluded directories during
+  discovery.
 - Do not modify other transcript stores, archives, remotes, or repositories.
 
 ## Workflow

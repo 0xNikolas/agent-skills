@@ -81,6 +81,36 @@ class RepoRenameTests(unittest.TestCase):
         self.assertIn("--confirm", result.stderr)
         self.assertFalse((Path(self.env["HOME"]) / "gh-writes").exists())
 
+    def test_preview_and_apply_preserve_protected_and_external_files(self) -> None:
+        notes = self.repo / ".ai"
+        notes.mkdir()
+        for name in ("PROMPT.md", "TODO.md"):
+            (notes / name).write_text("old-repo\n", encoding="utf-8")
+        external = self.root / "external.md"
+        external.write_text("old-repo\n", encoding="utf-8")
+        (self.repo / "linked.md").symlink_to(external)
+        (self.repo / "linked-dir").symlink_to(notes, target_is_directory=True)
+        subprocess.run(["git", "add", "-f", ".ai", "linked.md", "linked-dir"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixtures"], cwd=self.repo, check=True)
+        generated = self.repo / ".git" / "generated.md"
+        generated.write_text("old-repo\n", encoding="utf-8")
+
+        result = self.run_script("new-repo", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replacements = json.loads(result.stdout)["mutations"][-1]["files"]
+        self.assertEqual(replacements, [{"path": str((self.repo / "README.md").resolve()), "occurrences": 1}])
+
+        result = self.run_script("new-repo", "--apply", "--confirm", "owner/old-repo->owner/new-repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        renamed = self.root / "new-repo"
+        self.assertEqual((renamed / "README.md").read_text(), "new-repo\n")
+        for name in ("PROMPT.md", "TODO.md"):
+            self.assertEqual((renamed / ".ai" / name).read_text(), "old-repo\n")
+        self.assertEqual((renamed / ".git" / "generated.md").read_text(), "old-repo\n")
+        self.assertTrue((renamed / "linked.md").is_symlink())
+        self.assertTrue((renamed / "linked-dir").is_symlink())
+        self.assertEqual(external.read_text(), "old-repo\n")
+
 
 if __name__ == "__main__":
     unittest.main()

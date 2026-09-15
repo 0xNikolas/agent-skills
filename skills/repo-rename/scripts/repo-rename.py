@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 EXCLUDED_PARTS = {".git", "node_modules", "dist", "build", ".next", "coverage"}
+PROTECTED_FILES = {"PROMPT.md", "TODO.md"}
 
 
 class RenameError(RuntimeError):
@@ -37,17 +38,21 @@ def run(*args: str, cwd: Path | None = None) -> str:
 
 
 def readable_files(root: Path, *, repo: bool = False) -> list[Path]:
-    if not root.exists():
+    if root.is_symlink() or not root.exists() or root.name in PROTECTED_FILES:
         return []
     if root.is_file():
         return [root]
     files: list[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        if repo and any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts):
-            continue
-        files.append(path)
+    for directory, names, filenames in os.walk(root):
+        parent = Path(directory)
+        names[:] = [
+            name for name in names
+            if not (parent / name).is_symlink() and not (repo and name in EXCLUDED_PARTS)
+        ]
+        for name in filenames:
+            path = parent / name
+            if name not in PROTECTED_FILES and not path.is_symlink() and path.is_file():
+                files.append(path)
     return files
 
 
