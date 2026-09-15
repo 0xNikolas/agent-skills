@@ -57,7 +57,7 @@ Observed on 2026-07-08. Presence here does not override the canonical explorer/R
 | Lightlink       | `1890`     | ETH    | blockscout | https://phoenix.lightlink.io/                    |                                                   |
 | Linea           | `59144`    | ETH    | self       | https://explorer.linea.build/                    |                                                   |
 | Mode            | `34443`    | ETH    | blockscout | https://explorer.mode.network/                   |                                                   |
-| Morph           | `2818`     | ETH    | self       | https://explorer.morphl2.io/                     |                                                   |
+| Morph           | `2818`     | ETH    | self       | https://explorer.morph.network/                  | Separate API host; see explorerApiUrl             |
 | Optimism        | `10`       | ETH    | blockscout | https://explorer.optimism.io/                    |                                                   |
 | Polygon         | `137`      | POL    | blockscout | https://polygon.blockscout.com/                  |                                                   |
 | Robinhood Chain | `4663`     | ETH    | blockscout | https://robinhoodchain.blockscout.com/           |                                                   |

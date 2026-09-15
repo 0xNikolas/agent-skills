@@ -273,7 +273,8 @@
       "blockscout": {
         "status": "observed",
         "hostedBy": "self",
-        "instanceUrl": "https://explorer.morphl2.io/"
+        "instanceUrl": "https://explorer.morph.network/",
+        "notes": "Separate API host; see explorerApiUrl"
       }
     },
     "optimism": {

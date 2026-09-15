@@ -10,6 +10,7 @@
 #   name=<string>
 #   native_currency=<symbol>
 #   instance_url=<url, ends in />
+#   api_url=<API base URL, without trailing slash>
 #   hosted_by=<blockscout|other>
 #   is_testnet=<true|false>
 #   layer=<int|>
@@ -124,11 +125,18 @@ testnet=$(bval "isTestnet")
 layer=$(nval "layer")
 rollup=$(sval "rollupType")
 
+api="${instance%/}/api"
+# Explicit registry API bases override stale Chainscout page-host routes.
+case "$chain_id" in
+  2818) instance='https://explorer.morph.network/'; api='https://explorer-api.morph.network/api' ;;
+esac
+
 cat <<EOF
 chain_id=$chain_id
 name=$name
 native_currency=$native
 instance_url=$instance
+api_url=$api
 hosted_by=$hosted
 is_testnet=$testnet
 layer=$layer

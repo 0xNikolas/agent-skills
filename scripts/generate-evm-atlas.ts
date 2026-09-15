@@ -13,7 +13,7 @@ type RegistryChain = {
   accountActivityModel: string;
   aliases: string[];
   chainId: number;
-  explorer: { addressUrl: string; txUrl: string };
+  explorer: { addressUrl: string; apiUrl?: string; txUrl: string };
   name: string;
   nativeCurrency: { symbol: string };
   slug: string;
@@ -319,6 +319,7 @@ function targetMainnets(registryChains: RegistryChain[], data: AtlasOverlay) {
       nativeCurrencySymbol: chain.nativeCurrency.symbol,
       explorerUrl: explorerBaseUrl(chain),
       explorerAddressUrl: chain.explorer.addressUrl,
+      ...(chain.explorer.apiUrl ? { explorerApiUrl: chain.explorer.apiUrl } : {}),
       explorerTxUrl: chain.explorer.txUrl,
       routeMesh: row.routeMesh,
     };
@@ -498,6 +499,13 @@ function resolveChainScript(registryChains: RegistryChain[], data: AtlasOverlay)
     const pattern = overlayRow(data, chain).chainscoutNamePattern ?? chain.name;
     return `    ${chain.chainId}) printf '%s\\n' '${singleQuote(pattern)}' ;;`;
   });
+  const apiOverrides = registryChains.flatMap((chain) =>
+    chain.explorer.apiUrl
+      ? [
+          `  ${chain.chainId}) instance='${singleQuote(explorerBaseUrl(chain))}/'; api='${singleQuote(chain.explorer.apiUrl)}' ;;`,
+        ]
+      : [],
+  );
   const unsafeCases = registryChains
     .filter((chain) => overlayRow(data, chain).blockscout.status === "unsafe")
     .map((chain) => {
@@ -525,6 +533,7 @@ function resolveChainScript(registryChains: RegistryChain[], data: AtlasOverlay)
     "#   name=<string>",
     "#   native_currency=<symbol>",
     "#   instance_url=<url, ends in />",
+    "#   api_url=<API base URL, without trailing slash>",
     "#   hosted_by=<blockscout|other>",
     "#   is_testnet=<true|false>",
     "#   layer=<int|>",
@@ -601,11 +610,18 @@ function resolveChainScript(registryChains: RegistryChain[], data: AtlasOverlay)
     'layer=$(nval "layer")',
     'rollup=$(sval "rollupType")',
     "",
+    'api="${instance%/}/api"',
+    "# Explicit registry API bases override stale Chainscout page-host routes.",
+    'case "$chain_id" in',
+    ...apiOverrides,
+    "esac",
+    "",
     "cat <<EOF",
     "chain_id=$chain_id",
     "name=$name",
     "native_currency=$native",
     "instance_url=$instance",
+    "api_url=$api",
     "hosted_by=$hosted",
     "is_testnet=$testnet",
     "layer=$layer",

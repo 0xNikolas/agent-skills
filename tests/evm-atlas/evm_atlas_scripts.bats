@@ -133,7 +133,18 @@ setup() {
   run "$RESOLVE_CHAIN" 1
 
   [ "$status" -eq 0 ]
-  [ "$output" = $'chain_id=1\nname=Ethereum Mainnet\nnative_currency=ETH\ninstance_url=https://eth.blockscout.com/\nhosted_by=blockscout\nis_testnet=false\nlayer=1\nrollup_type=' ]
+  [ "$output" = $'chain_id=1\nname=Ethereum Mainnet\nnative_currency=ETH\ninstance_url=https://eth.blockscout.com/\napi_url=https://eth.blockscout.com/api\nhosted_by=blockscout\nis_testnet=false\nlayer=1\nrollup_type=' ]
+}
+
+@test "resolve-chain overrides Morph's stale Chainscout UI and API hosts" {
+  export MOCK_CHAIN_RESPONSE='{"name":"Morph","native_currency":"ETH","explorers":[{"url":"https://explorer.morphl2.io/"}],"hostedBy":"self","isTestnet":false,"layer":2,"rollupType":"optimistic"}'
+
+  run "$RESOLVE_CHAIN" 2818
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"instance_url=https://explorer.morph.network/"* ]]
+  [[ "$output" == *"api_url=https://explorer-api.morph.network/api"* ]]
+  [[ "$output" != *"morphl2.io"* ]]
 }
 
 @test "resolve-chain rejects unsafe and out-of-scope target IDs before requesting Chainscout" {
