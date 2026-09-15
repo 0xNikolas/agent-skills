@@ -92,10 +92,10 @@ report the failed command, completed groups, and changed paths.
 Group `Changed global paths` by reported repo root. Retain all claims acquired in step 3 through every target commit and
 push; never perform a post-apply `start`. For each repo with reported changed paths, commit and push only those paths.
 For a repo with no reported diff, confirm its planned paths have no diff. Once every target's changes are pushed or
-verified absent, run `ai-coord done` once if claims were acquired. For a bundle, this releases every target, not only
-the current repository. Never claim unreported skills, unrelated dirty paths, or the CLI process/state lock. A
-dirty-settling result on a reported publisher-written path is a regression, not expected waiting: preserve the claims
-and stop with the evidence.
+verified absent, run `ai-coord done` once from a claimed target repository if claims were acquired. For a bundle, this
+releases every target, not only the current repository. Never claim unreported skills, unrelated dirty paths, or the CLI
+process/state lock. A dirty-settling result on a reported publisher-written path is a regression, not expected waiting:
+preserve the claims and stop with the evidence.
 
 ### 5. Final Check
 
