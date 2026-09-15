@@ -154,6 +154,12 @@ setup() {
   [[ "$output" == *"chain_id=250 is marked unsafe"* ]]
   [ ! -e "$MOCK_CURL_LOG" ]
 
+  run "$RESOLVE_CHAIN" 5330
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Conduit Explorer"* ]]
+  [ ! -e "$MOCK_CURL_LOG" ]
+
   run "$RESOLVE_CHAIN" 999999
 
   [ "$status" -eq 2 ]

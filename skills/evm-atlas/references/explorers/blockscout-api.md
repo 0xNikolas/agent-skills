@@ -290,6 +290,10 @@ Use the helper's `api_url` for API requests; `instance_url` is the page host. An
 `https://explorer-api.morph.network/api` for its API and `https://explorer.morph.network` for pages, verified in
 Chromium and through the API on 2026-09-15.
 
+Superseed (`5330`) is not a usable Blockscout instance despite its stale Chainscout entry. Chromium verified on
+2026-09-15 that `https://explorer.superseed.xyz` serves Conduit Explorer and explicitly lacks historical transactions,
+holdings, and transfers. Use the target RPC for state facts; preserve indexed-history coverage as unknown.
+
 Per-instance hosts are community-operated for many chains, so uptime and indexing depth vary. Do not use one to bypass
 missing credentials, rate limits, or transient errors on a Blockscout-hosted target.
 

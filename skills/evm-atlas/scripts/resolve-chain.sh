@@ -85,6 +85,7 @@ unsafe_reason() {
   case "$1" in
     250) printf '%s\n' 'Chainscout still lists self-hosted FTMScout at https://ftmscout.com/, but as checked 2026-07-31 its frontend returns HTTP 200 while /api/v2/* data routes return HTTP 500; do not use it for evidence' ;;
     2020) printf '%s\n' 'Chainscout returns a different network for `2020`; app.roninchain.com blocks scripted access, so verify with `$chromium-browser` instead of curl or WebFetch' ;;
+    5330) printf '%s\n' 'Chromium verified 2026-09-15: explorer.superseed.xyz now serves Conduit Explorer, which does not support historical transactions, holdings, or transfers; do not use its stale Chainscout Blockscout route' ;;
     *)
       return 1
       ;;
