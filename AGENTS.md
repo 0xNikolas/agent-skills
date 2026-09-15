@@ -105,6 +105,10 @@ Run `just` to list every recipe with its description; the `justfile` is authorit
   catalog skills.
 - After editing skills that must stay aligned, run the `sync-skills` internal skill to check coupled skills and helper
   data.
+- Claude Code slash commands under `~/.claude/commands/<skill>/*.md` are thin wrappers over catalog skills (currently
+  `agents-brain` and `yeet`). After changing a skill's workflows, argument forms, context requirements, or reference
+  file names, update the matching commands in the same session: argument hints, descriptions, `## Context` reads, and
+  reference paths must match the skill, and every user-facing workflow needs a command. Commit them in `~/.claude`.
 - Keep skills self-contained. Do not de-duplicate content across skills by extracting shared references or canonical
   files; users install skills individually.
 - Keep globally installed skills self-contained. Do not refer to or depend on another repository; put reusable guidance
