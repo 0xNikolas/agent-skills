@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-EXCLUDED_PARTS = {".git", "node_modules", "dist", "build", ".next", "coverage"}
+EXCLUDED_PARTS = {".git", "node_modules", ".venv", "venv", ".cache", "__pycache__", "dist", "build", ".next", "coverage"}
 PROTECTED_FILES = {"PROMPT.md", "TODO.md"}
 
 
@@ -66,31 +66,40 @@ def count_pairs(path: Path, pairs: tuple[tuple[bytes, bytes], ...]) -> int:
     return sum(data.count(old) for old, _ in pairs)
 
 
-def collect_replacements(old_root: Path, new_root: Path, old_name: str, new_name: str) -> list[Replacement]:
+def continuity_paths() -> tuple[Path, Path]:
     home = Path.home()
-    candidates: dict[Path, tuple[tuple[bytes, bytes], ...]] = {}
-    path_pair = ((str(old_root).encode(), str(new_root).encode()),)
-    for root in (home / ".claude/projects", home / "claude/projects", home / ".codex/sessions"):
-        for path in readable_files(root):
-            candidates[path] = path_pair
+    return (
+        Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude") / "projects",
+        Path(os.environ.get("CODEX_HOME") or home / ".codex"),
+    )
 
-    config = home / ".codex/config.toml"
-    if config.is_file():
-        candidates[config] = (
-            (str(old_root).encode(), str(new_root).encode()),
-            (old_name.encode(), new_name.encode()),
-        )
+
+def collect_replacements(old_root: Path, new_root: Path, old_name: str, new_name: str) -> list[Replacement]:
+    claude_projects, codex_home = continuity_paths()
+    path_pair = ((str(old_root).encode(), str(new_root).encode()),)
+    replacements = []
+    for path in readable_files(codex_home / "sessions"):
+        occurrences = count_pairs(path, path_pair)
+        if occurrences:
+            replacements.append(Replacement(path, path_pair, occurrences))
+
+    project = claude_projects / str(old_root).replace("/", "-")
+    claude_active = project.is_dir() and next(project.iterdir(), None) is not None
+    if claude_active or replacements:
+        candidates = set()
+        for root in (claude_projects, Path.home() / "claude/projects", codex_home / "config.toml"):
+            candidates.update(readable_files(root))
+        for path in candidates:
+            occurrences = count_pairs(path, path_pair)
+            if occurrences:
+                replacements.append(Replacement(path, path_pair, occurrences))
 
     name_pair = ((old_name.encode(), new_name.encode()),)
     for path in readable_files(old_root, repo=True):
-        candidates[path] = name_pair
-
-    replacements = []
-    for path, pairs in sorted(candidates.items(), key=lambda item: str(item[0])):
-        occurrences = count_pairs(path, pairs)
+        occurrences = count_pairs(path, name_pair)
         if occurrences:
-            replacements.append(Replacement(path, pairs, occurrences))
-    return replacements
+            replacements.append(Replacement(path, name_pair, occurrences))
+    return sorted(replacements, key=lambda item: str(item.path))
 
 
 def preflight(new_name: str) -> dict[str, object]:
@@ -121,9 +130,9 @@ def preflight(new_name: str) -> dict[str, object]:
     else:
         new_remote = f"git@github.com:{owner}/{new_name}.git"
 
-    home = Path.home()
-    old_claude = home / ".claude/projects" / str(old_root).replace("/", "-")
-    new_claude = home / ".claude/projects" / str(new_root).replace("/", "-")
+    claude_projects, _ = continuity_paths()
+    old_claude = claude_projects / str(old_root).replace("/", "-")
+    new_claude = claude_projects / str(new_root).replace("/", "-")
     if old_claude.exists() and new_claude.exists():
         raise RenameError(f"target Claude project directory exists: {new_claude}")
 
@@ -141,7 +150,7 @@ def preflight(new_name: str) -> dict[str, object]:
         "new_remote": new_remote,
         "old_claude": old_claude,
         "new_claude": new_claude,
-        "move_claude": old_claude.is_dir(),
+        "move_claude": old_claude.is_dir() and next(old_claude.iterdir(), None) is not None,
         "replacements": replacements,
         "confirm": token,
     }

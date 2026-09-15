@@ -48,6 +48,8 @@ class RepoRenameTests(unittest.TestCase):
             "HOME": str(self.root / "home"),
             "PATH": f"{self.bin}:{os.environ['PATH']}",
         }
+        self.env.pop("CLAUDE_CONFIG_DIR", None)
+        self.env.pop("CODEX_HOME", None)
         Path(self.env["HOME"]).mkdir()
 
     def tearDown(self) -> None:
@@ -94,6 +96,11 @@ class RepoRenameTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", "fixtures"], cwd=self.repo, check=True)
         generated = self.repo / ".git" / "generated.md"
         generated.write_text("old-repo\n", encoding="utf-8")
+        for directory in (".venv", ".cache"):
+            excluded = self.repo / directory
+            excluded.mkdir()
+            (excluded / "generated.txt").write_text("old-repo\n", encoding="utf-8")
+        (self.repo / ".git" / "info" / "exclude").write_text(".venv/\n.cache/\n", encoding="utf-8")
 
         result = self.run_script("new-repo", "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -110,6 +117,49 @@ class RepoRenameTests(unittest.TestCase):
         self.assertTrue((renamed / "linked.md").is_symlink())
         self.assertTrue((renamed / "linked-dir").is_symlink())
         self.assertEqual(external.read_text(), "old-repo\n")
+        for directory in (".venv", ".cache"):
+            self.assertEqual((renamed / directory / "generated.txt").read_text(), "old-repo\n")
+
+    def test_continuity_requires_active_transcript_and_only_replaces_paths(self) -> None:
+        codex = self.root / "custom-codex"
+        codex.mkdir()
+        self.env["CODEX_HOME"] = str(codex)
+        config = codex / "config.toml"
+        old_path = str(self.repo.resolve())
+        config.write_text(f'project = "{old_path}"\nother = "old-repo"\n', encoding="utf-8")
+        result = self.run_script("new-repo", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = json.loads(result.stdout)["mutations"][-1]["files"]
+        self.assertEqual(len(files), 1)
+
+        sessions = codex / "sessions"
+        sessions.mkdir()
+        session = sessions / "session.jsonl"
+        session.write_text(json.dumps({"cwd": old_path}) + "\n", encoding="utf-8")
+        result = self.run_script("new-repo", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = json.loads(result.stdout)["mutations"][-1]["files"]
+        self.assertIn({"path": str(config), "occurrences": 1}, files)
+        self.assertEqual(len(files), 3)
+        result = self.run_script("new-repo", "--apply", "--confirm", "owner/old-repo->owner/new-repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        new_path = str((self.root / "new-repo").resolve())
+        self.assertEqual(config.read_text(), f'project = "{new_path}"\nother = "old-repo"\n')
+        self.assertEqual(json.loads(session.read_text())["cwd"], new_path)
+
+    def test_custom_claude_project_is_moved(self) -> None:
+        claude = self.root / "custom-claude"
+        self.env["CLAUDE_CONFIG_DIR"] = str(claude)
+        old_path = str(self.repo.resolve())
+        project = claude / "projects" / old_path.replace("/", "-")
+        project.mkdir(parents=True)
+        (project / "session.jsonl").write_text(json.dumps({"cwd": old_path}), encoding="utf-8")
+        result = self.run_script("new-repo", "--apply", "--confirm", "owner/old-repo->owner/new-repo")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        new_path = str((self.root / "new-repo").resolve())
+        moved = claude / "projects" / new_path.replace("/", "-")
+        self.assertFalse(project.exists())
+        self.assertEqual(json.loads((moved / "session.jsonl").read_text())["cwd"], new_path)
 
 
 if __name__ == "__main__":
