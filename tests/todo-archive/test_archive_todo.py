@@ -67,10 +67,25 @@ class ArchiveCommandTests(unittest.TestCase):
             text=True,
         )
 
+    def test_requires_todo_under_ai_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir).resolve()
+            root_todo = root / "TODO.md"
+            source = "# TODO\n\n- [x] Root task\n"
+            root_todo.write_text(source, encoding="utf-8")
+
+            result = self.run_helper(root, "--date", "2026-07-06")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(f"TODO.md not found: {root / '.ai/TODO.md'}", result.stderr)
+            self.assertEqual(root_todo.read_text(encoding="utf-8"), source)
+            self.assertFalse((root / ".ai/todos").exists())
+
     def test_archives_into_month_directories_for_both_date_formats(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir).resolve()
-            todo_path = root / "TODO.md"
+            todo_path = root / ".ai/TODO.md"
+            todo_path.parent.mkdir()
             todo_path.write_text("# TODO\n\n- [x] First\n- [ ] Keep\n", encoding="utf-8")
 
             result = self.run_helper(root, "--date", "2026-07-06")
@@ -92,7 +107,8 @@ class ArchiveCommandTests(unittest.TestCase):
     def test_same_day_runs_append_to_one_archive_with_one_matching_h1(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir).resolve()
-            todo_path = root / "TODO.md"
+            todo_path = root / ".ai/TODO.md"
+            todo_path.parent.mkdir()
             todo_path.write_text("# TODO\n\n- [x] First\n", encoding="utf-8")
 
             first = self.run_helper(root, "--date", "2026-07-06")
@@ -112,7 +128,7 @@ class ArchiveCommandTests(unittest.TestCase):
     def test_dry_run_renders_merged_archive_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir).resolve()
-            todo_path = root / "TODO.md"
+            todo_path = root / ".ai/TODO.md"
             archive_path = root / ".ai/todos/2026-07/06.md"
             archive_path.parent.mkdir(parents=True)
             archive_path.write_text("# TODO\n\n- [x] First\n", encoding="utf-8")
@@ -130,7 +146,8 @@ class ArchiveCommandTests(unittest.TestCase):
     def test_no_checked_tasks_and_unknown_hint_remain_noops(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir).resolve()
-            todo_path = root / "TODO.md"
+            todo_path = root / ".ai/TODO.md"
+            todo_path.parent.mkdir()
             source = "# TODO\n\n## Current\n\n- [ ] Keep\n"
             todo_path.write_text(source, encoding="utf-8")
 
