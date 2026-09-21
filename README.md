@@ -20,7 +20,7 @@ bunx skills add PaulRBerg/agent-skills
 | agents-brain         | Create or polish README.md, AGENTS.md, context docs, and existing skills  |
 | agents-docs          | Fetch current official Codex and Claude Code docs, including hooks/trust  |
 | agents-introspection | Retrospect on Codex/Claude Code transcript history                        |
-| ai-prune             | Archive stale .ai files and delete stale .cache entries                   |
+| ai-prune             | Archive stale .ai files and trash stale .cache entries on macOS           |
 | autoresearch         | Autonomous experiment loop                                                |
 | brainstorm           | Co-create novel ideas and converge on a testable concept                  |
 | claude-handoff       | Delegate approved Claude plans to Sonnet or Opus subagents                |
