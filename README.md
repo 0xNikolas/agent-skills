@@ -1,11 +1,12 @@
 # Agent Skills
 
-PRB's collection of AI agent skills. Designed to work across agents, but primarily built for
-[Claude Code](https://claude.com/product/claude-code) and [Codex](https://github.com/openai/codex).
+Nicu's collection of AI agent skills, forked from [PaulRBerg/agent-skills](https://github.com/PaulRBerg/agent-skills).
+Designed to work across agents, but primarily built for [Claude Code](https://claude.com/product/claude-code) and
+[Codex](https://github.com/openai/codex).
 
-> [!WARNING] This catalog intentionally reflects Paul's preferred tools, defaults, safety boundaries, and writing voice;
-> it is not a neutral template. If you install it, review every workflow and customize it for your stack and agents. No
-> warranties, guarantees, or support are provided — use at your own risk.
+> [!WARNING] This catalog intentionally reflects its owner's preferred tools, defaults, safety boundaries, and writing
+> voice; it is not a neutral template. If you install it, review every workflow and customize it for your stack and
+> agents. No warranties, guarantees, or support are provided — use at your own risk.
 
 ## Installation
 
@@ -77,8 +78,8 @@ where deterministic tooling already carries the workflow.
 
 - [Skills Issues](https://github.com/vercel-labs/skills/issues)
 - [Introducing Skills](https://vercel.com/changelog/introducing-skills-the-open-agent-skills-ecosystem)
-- [dot-claude](https://github.com/PaulRBerg/dot-claude)
-- [dot-agents](https://github.com/PaulRBerg/dot-agents)
+- [dot-claude](https://github.com/0xNikolas/dot-claude)
+- [dot-agents](https://github.com/0xNikolas/dot-agents)
 
 ## License
 

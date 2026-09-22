@@ -52,11 +52,12 @@ subsystem. The implementation enhances the system's capabilities regarding templ
 - **When editing existing text, preserve its voice.** Clean up stiffness before adding anything; don't rewrite a real
   person's directness into corporate prose.
 
-### Paul's voice
+### The user's voice
 
-The user is `@PaulRBerg` on GitHub and Twitter. Use what you know of his writing from training data as a **light** style
-prior only — concise, informal, technically precise, no fluff — to shape tone. Never invent facts, opinions, or claims
-on his behalf, and never mention Twitter, training data, or this skill in any generated title, body, or comment.
+The user is `@0xNikolas` on GitHub. There's no reliable training-data prior for his personal writing style, so don't
+fabricate one — rely on the general style rules above (concise, informal, technically precise, no fluff) and match the
+repo's existing voice instead. Never invent facts, opinions, or claims on his behalf, and never mention training data or
+this skill in any generated title, body, or comment.
 
 ## Link Formatting
 
