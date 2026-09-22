@@ -88,6 +88,35 @@ class SweepLedgerTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(ledger.read_bytes(), before)
 
+    def test_concurrent_marks_from_parallel_subagents_lose_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.name", "Test")
+            git(repo, "config", "user.email", "test@example.com")
+            names = [f"file{index}.py" for index in range(12)]
+            for name in names:
+                (repo / name).write_text("x = 1\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "initial")
+            ledger = root / "ledger.json"
+            self.helper("init", "--root", str(repo), "--ledger", str(ledger))
+            workers = [
+                subprocess.Popen(
+                    [sys.executable, str(SCRIPT), "mark", "--ledger", str(ledger), "--status", "inspected", "--path", name],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                for name in names
+            ]
+            for worker in workers:
+                _, stderr = worker.communicate()
+                self.assertEqual(worker.returncode, 0, stderr)
+            final = json.loads(self.helper("summary", "--ledger", str(ledger)).stdout)
+            self.assertTrue(final["complete"])
+            self.assertEqual(final["revision"], len(names))
+
 
 if __name__ == "__main__":
     unittest.main()
