@@ -1,8 +1,7 @@
 # Agent Skills
 
-Nicu's collection of AI agent skills, forked from [PaulRBerg/agent-skills](https://github.com/PaulRBerg/agent-skills).
-Designed to work across agents, but primarily built for [Claude Code](https://claude.com/product/claude-code) and
-[Codex](https://github.com/openai/codex).
+Nicu's collection of AI agent skills. Designed to work across agents, but primarily built for
+[Claude Code](https://claude.com/product/claude-code) and [Codex](https://github.com/openai/codex).
 
 > [!WARNING] This catalog intentionally reflects its owner's preferred tools, defaults, safety boundaries, and writing
 > voice; it is not a neutral template. If you install it, review every workflow and customize it for your stack and
