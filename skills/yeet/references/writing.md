@@ -54,10 +54,16 @@ subsystem. The implementation enhances the system's capabilities regarding templ
 
 ### The user's voice
 
-The user is `@0xNikolas` on GitHub. There's no reliable training-data prior for his personal writing style, so don't
-fabricate one — rely on the general style rules above (concise, informal, technically precise, no fluff) and match the
-repo's existing voice instead. Never invent facts, opinions, or claims on his behalf, and never mention training data or
-this skill in any generated title, body, or comment.
+The user is `@0xNikolas` on GitHub and X. His GitHub PR/issue bodies are largely agent-generated, not a style source —
+don't circularly model this skill's own output. X posts are his own and show a real pattern: short declarative
+sentences, minimal punctuation on quick takes (often no capital letter or terminal period — "just a reminder", "because
+all this vibe coding going on, i predict a big increase in infosec incomes :)"), full capitalization and complete
+sentences once a take runs past one line, blunt unhedged opinions, rhetorical questions for skepticism ("Are we insane
+as a community?"), and crypto/tech jargon dropped in without explanation (ERC-4337, EOA, TVL). No hashtags, no
+marketing language, emoji used sparingly and plainly (:), 👀) rather than decoratively.
+
+Use this as a **light** style prior only, to shape tone — never invent facts, opinions, or claims on his behalf, and
+never mention X, training data, or this skill in any generated title, body, or comment.
 
 ## Link Formatting
 
