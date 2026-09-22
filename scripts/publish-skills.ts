@@ -70,12 +70,16 @@ const validSkillName = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const scriptRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const homeDir = os.homedir();
 const stateRoot = process.env.XDG_STATE_HOME ?? path.join(homeDir, ".local", "state");
+// Mirror the skills CLI: XDG state only when XDG_STATE_HOME is set, otherwise ~/.agents.
+const cliLockFile = process.env.XDG_STATE_HOME
+  ? path.join(process.env.XDG_STATE_HOME, "skills", ".skill-lock.json")
+  : path.join(homeDir, ".agents", ".skill-lock.json");
 const config = {
   agentsRoot: path.resolve(process.env.PUBLISH_SKILLS_AGENTS_ROOT ?? path.join(homeDir, ".agents")),
   bunx: process.env.PUBLISH_SKILLS_BUNX ?? "bunx",
   claudeRoot: path.resolve(process.env.PUBLISH_SKILLS_CLAUDE_ROOT ?? path.join(homeDir, ".claude")),
   codexRoot: path.resolve(process.env.PUBLISH_SKILLS_CODEX_ROOT ?? path.join(homeDir, ".codex")),
-  lockFile: path.resolve(process.env.PUBLISH_SKILLS_LOCK_FILE ?? path.join(stateRoot, "skills", ".skill-lock.json")),
+  lockFile: path.resolve(process.env.PUBLISH_SKILLS_LOCK_FILE ?? cliLockFile),
   processLock: path.resolve(
     process.env.PUBLISH_SKILLS_PROCESS_LOCK ?? path.join(stateRoot, "skills", ".publish-skills.lock"),
   ),
