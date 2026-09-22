@@ -29,7 +29,6 @@ bunx skills add 0xNikolas/agent-skills
 | cli-coingecko        | CoinGecko CLI for prices and market data                                  |
 | cli-gh               | GitHub CLI operations                                                     |
 | cli-just             | Just command runner guidance                                              |
-| codebase-design      | Shared vocabulary and principles for designing deep modules               |
 | codex-handoff        | Delegate approved plans to Codex agents from Claude Code or Codex CLI     |
 | code-polish          | Simplify and/or risk-profiled review with autofix                         |
 | commit               | Semantic commit messages with deterministic ai-commit mechanics           |
@@ -40,7 +39,6 @@ bunx skills add 0xNikolas/agent-skills
 | frontend-design      | Distinctive, subject-specific frontend design                             |
 | fresh-eyes-sweep     | Meticulous whole-repository audit and verified fixes                      |
 | git-squash           | Squash PR branch with semantic commit message                             |
-| grill-me             | Relentlessly stress-test plans and designs                                |
 | html-debrief         | Interactive HTML task debriefs                                            |
 | html-playground      | Interactive single-file HTML playgrounds                                  |
 | interview-me         | Clarify plans and ideas through a focused, lightweight interview          |
