@@ -22,8 +22,8 @@ type PlanJson = {
 type LockEntry = Record<string, unknown>;
 type CliLock = { [key: string]: unknown; skills: Record<string, LockEntry>; version: number };
 
-const repository = "PaulRBerg/agent-skills";
-const sourceUrl = "https://github.com/PaulRBerg/agent-skills.git";
+const repository = "0xNikolas/agent-skills";
+const sourceUrl = "https://github.com/0xNikolas/agent-skills.git";
 const scriptPath = path.join(
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
   "scripts",

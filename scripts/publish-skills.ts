@@ -64,8 +64,8 @@ type TargetPaths = Record<"agents" | "claude" | "codex", string>;
 type ClaimScope = "file" | "recursive";
 type RepoClaim = { canonical: boolean; paths: Array<{ path: string; scope: ClaimScope }>; root: string };
 
-const repository = "PaulRBerg/agent-skills";
-const sourceUrl = "https://github.com/PaulRBerg/agent-skills.git";
+const repository = "0xNikolas/agent-skills";
+const sourceUrl = "https://github.com/0xNikolas/agent-skills.git";
 const validSkillName = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const scriptRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const homeDir = os.homedir();
