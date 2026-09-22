@@ -418,7 +418,7 @@ function etherscanChainsMarkdown(registryChains: RegistryChain[], data: AtlasOve
       ]),
     ),
     "",
-    "Testnets are outside this skill's target list. If the user asks about any non-target chain, ask them to file a feature request in <https://github.com/PaulRBerg/agent-skills>.",
+    "Testnets are outside this skill's target list. If the user asks about any non-target chain, ask them to file a feature request in <https://github.com/0xNikolas/agent-skills>.",
     "",
   ].join("\n");
 }
@@ -431,7 +431,7 @@ function blockscoutChainsMarkdown(registryChains: RegistryChain[], data: AtlasOv
     "",
     `<!-- ${generatedBy} -->`,
     "",
-    "Blockscout and Chainscout index many EVM networks, but this skill only uses them for chains in `references/generated/target-mainnets.json`. Do not use Chainscout to expand scope. If a requested chain is not in that JSON file, ask the user to file a feature request in <https://github.com/PaulRBerg/agent-skills>.",
+    "Blockscout and Chainscout index many EVM networks, but this skill only uses them for chains in `references/generated/target-mainnets.json`. Do not use Chainscout to expand scope. If a requested chain is not in that JSON file, ask the user to file a feature request in <https://github.com/0xNikolas/agent-skills>.",
     "",
     "## Chainscout API",
     "",
@@ -496,7 +496,7 @@ function blockscoutChainsMarkdown(registryChains: RegistryChain[], data: AtlasOv
     "",
     "## Contributing",
     "",
-    "Missing or wrong Blockscout registry data is fixed via PR to <https://github.com/blockscout/chainscout>. Requests to add non-target chains to this skill belong in <https://github.com/PaulRBerg/agent-skills>.",
+    "Missing or wrong Blockscout registry data is fixed via PR to <https://github.com/blockscout/chainscout>. Requests to add non-target chains to this skill belong in <https://github.com/0xNikolas/agent-skills>.",
     "",
   ].join("\n");
 }
@@ -569,7 +569,7 @@ function resolveChainScript(registryChains: RegistryChain[], data: AtlasOverlay)
     "",
     'expected_pattern=$(target_name_pattern "$chain_id") || {',
     '  echo "Error: chain_id=$chain_id is outside the evm-atlas target list." >&2',
-    '  echo "Ask the user to file a feature request in https://github.com/PaulRBerg/agent-skills" >&2',
+    '  echo "Ask the user to file a feature request in https://github.com/0xNikolas/agent-skills" >&2',
     "  exit 2",
     "}",
     "",

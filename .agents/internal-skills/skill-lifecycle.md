@@ -38,7 +38,7 @@ Checklists for the three lifecycle operations on skills owned by this repository
 2. Remove the `README.md` row.
 3. `rg` the repo for `skill-dependencies` entries and `$<name>` references in other skills; update or remove them.
 4. Publish. The remove group cleans up global installs and the CLI lock.
-5. Caveat: a CLI-lock entry whose `source` is not `PaulRBerg/agent-skills` is invisible to the planner. Remove such an
+5. Caveat: a CLI-lock entry whose `source` is not `0xNikolas/agent-skills` is invisible to the planner. Remove such an
    install manually with `bunx skills remove --global --skill <name> --yes`.
 
 ## Internal Skills (Create / Rename / Delete)
