@@ -40,7 +40,6 @@ From a clone, `just toolkit::install-cli` installs the supported CLIs into `~/.l
 | repo-fanout              | Agent tooling | Run one task or skill across many repositories with per-repo agents       |
 | retro                    | Agent tooling | Session retrospectives with transcript-backed environment fixes           |
 | skill-harmonization      | Agent tooling | Harmonize repository and user-installed skill portfolios                  |
-| task-handoff             | Agent tooling | Create one single- or cross-repository Codex task handoff plan            |
 | wrap-up                  | Agent tooling | Wind down a session fast: collect subagent wrap-ups and hand off the rest |
 | cli-cast                 | Crypto        | Foundry cast CLI guidance                                                 |
 | cli-coingecko            | Crypto        | CoinGecko CLI for prices and market data                                  |
