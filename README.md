@@ -51,6 +51,7 @@ From a clone, `just toolkit::install-cli` installs the supported CLIs into `~/.l
 | apple-device-integration | Engineering   | Verify native UI with Apple's Xcode MCP screenshots, hierarchy, and input |
 | cli-just                 | Engineering   | Just command runner guidance                                              |
 | code-polish              | Engineering   | Simplify and/or risk-profiled review with autofix                         |
+| codebase-design          | Engineering   | Deep-module vocabulary and agent-legible codebase design                  |
 | deslop                   | Engineering   | Remove unnecessary material and consolidate related code and guidance     |
 | effect-ts                | Engineering   | Effect 4 patterns and source-aligned guidance                             |
 | fresh-eyes-sweep         | Engineering   | Whole-repository audit of code, tests, and comments with verified fixes   |
@@ -69,6 +70,7 @@ From a clone, `just toolkit::install-cli` installs the supported CLIs into `~/.l
 | yeet                     | Git & GitHub  | GitHub contribution workflows                                             |
 | ai-prune                 | Productivity  | Archive stale .ai files and trash stale .cache entries on macOS           |
 | brainstorm-with-me       | Productivity  | Co-create novel ideas and converge on a testable concept                  |
+| grill-me                 | Productivity  | Relentlessly stress-test plans and designs                                |
 | interview-me             | Productivity  | Clarify plans and ideas through a focused, lightweight interview          |
 | social-media             | Productivity  | Prepare social images, cross-post, refresh previews, and find subreddits  |
 | todo-archive             | Productivity  | Archive checked TODO.md tasks into .ai/todos                              |
@@ -89,6 +91,8 @@ merge.
 | Skill                    | Source                                                                                                                                                 |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | apple-device-integration | [Apple Xcode: device-interaction (export mirror)](https://github.com/raven/xcode-agent-skills/tree/main/skills/device-interaction)                     |
+| codebase-design          | [mattpocock/skills: codebase-design](https://github.com/mattpocock/skills/tree/main/skills/engineering/codebase-design)                                |
+| grill-me                 | [mattpocock/skills: grilling](https://github.com/mattpocock/skills/tree/main/skills/productivity/grilling)                                             |
 | html-playground          | [anthropics/claude-plugins-official: playground](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/playground/skills/playground) |
 | retro                    | [mattpocock/skills: retro](https://github.com/mattpocock/skills/tree/main/skills/engineering/retro)                                                    |
 
