@@ -7,7 +7,6 @@ import sys
 import tempfile
 import unittest
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "skills" / "todo-archive" / "scripts" / "archive_todo.py"
 SPEC = importlib.util.spec_from_file_location("archive_todo", SCRIPT_PATH)
@@ -37,9 +36,7 @@ More non-task content.
         tree = archive_todo.parse_document(source.splitlines(keepends=True))
         archive_todo.mark_tasks(tree, hint=None, in_section=True)
 
-        remaining = archive_todo.finalize(
-            archive_todo.render(tree, archive=False), fallback_heading="# TODO\n"
-        )
+        remaining = archive_todo.finalize(archive_todo.render(tree, archive=False), fallback_heading="# TODO\n")
 
         self.assertEqual(
             remaining,
@@ -92,7 +89,6 @@ class ArchiveCommandTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((root / ".ai/todos/2026-07/06.md").exists())
-            self.assertFalse((root / ".ai/todos/TODO_UNTIL_2026_07_06.md").exists())
             self.assertEqual(todo_path.read_text(encoding="utf-8"), "# TODO\n\n- [ ] Keep\n")
 
             todo_path.write_text("# TODO\n\n- [x] Second\n", encoding="utf-8")
@@ -143,6 +139,26 @@ class ArchiveCommandTests(unittest.TestCase):
             self.assertEqual(archive_path.read_text(encoding="utf-8"), "# TODO\n\n- [x] First\n")
             self.assertEqual(todo_path.read_text(encoding="utf-8"), source)
 
+    def test_hint_archives_only_matching_section_subtree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir).resolve()
+            todo_path = root / ".ai/TODO.md"
+            todo_path.parent.mkdir()
+            todo_path.write_text(
+                "# TODO\n\n## Fixes\n\n- [x] Fix\n\n### Nested\n\n- [x] Nested fix\n\n## Other\n\n- [x] Other done\n",
+                encoding="utf-8",
+            )
+
+            result = self.run_helper(root, "--hint", "fix", "--date", "2026-07-06")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Section(s): Fixes", result.stdout)
+            self.assertEqual(
+                (root / ".ai/todos/2026-07/06.md").read_text(encoding="utf-8"),
+                "# TODO\n\n## Fixes\n\n- [x] Fix\n\n### Nested\n\n- [x] Nested fix\n",
+            )
+            self.assertEqual(todo_path.read_text(encoding="utf-8"), "# TODO\n\n## Other\n\n- [x] Other done\n")
+
     def test_no_checked_tasks_and_unknown_hint_remain_noops(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = pathlib.Path(temp_dir).resolve()
@@ -164,14 +180,13 @@ class ArchiveCommandTests(unittest.TestCase):
 
 class MergeArchiveTests(unittest.TestCase):
     def test_keeps_distinct_leading_h1s(self) -> None:
-        merged = archive_todo.merge_archive_text(
-            "# Earlier\n\n- [x] First\n", "# TODO\n\n- [x] Second\n"
-        )
+        merged = archive_todo.merge_archive_text("# Earlier\n\n- [x] First\n", "# TODO\n\n- [x] Second\n")
 
         self.assertEqual(
             merged,
             "# Earlier\n\n- [x] First\n\n# TODO\n\n- [x] Second\n",
         )
+
 
 if __name__ == "__main__":
     unittest.main()

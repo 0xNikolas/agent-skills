@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "skills" / "node-deps-bumper" / "scripts" / "update-bun-catalogs.py"
 
@@ -16,6 +15,7 @@ class UpdateBunCatalogsTests(unittest.TestCase):
     def run_helper(self, root: Path, plan: Path, *extra: str, check: bool = True):
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--root", str(root), "--plan", str(plan), "--include", "react,jest", *extra],
+            check=False,
             text=True,
             capture_output=True,
         )
@@ -37,10 +37,17 @@ class UpdateBunCatalogsTests(unittest.TestCase):
             }
             package.write_text(json.dumps(original), encoding="utf-8")
             plan = root / "plan.json"
-            plan.write_text(json.dumps({"updates": [
-                {"package": "react", "current": "18.2.0", "available": "19.0.0"},
-                {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
-            ]}), encoding="utf-8")
+            plan.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {"package": "react", "current": "18.2.0", "available": "19.0.0"},
+                            {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
             preview = json.loads(self.run_helper(root, plan).stdout)
             self.assertFalse(preview["wrote"])
             self.assertEqual(json.loads(package.read_text()), original)
@@ -51,6 +58,57 @@ class UpdateBunCatalogsTests(unittest.TestCase):
             self.assertEqual(updated["workspaces"]["catalogs"]["testing"]["react"], "~19.0.0")
             self.assertEqual(updated["workspaces"]["catalogs"]["testing"]["jest"], "30.0.0")
 
+    def test_equivalent_rows_preserve_catalog_prefixes_and_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package.json"
+            original = {
+                "catalog": {"react": "^18.2.0", "jest": "~29.0.0"},
+                "overrides": {"react": "18.2.0"},
+            }
+            package.write_text(json.dumps(original))
+            plan = root / "plan.json"
+            plan.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {"package": "react", "current": "^18.2.0", "available": "^19.0.0"},
+                            {"package": "react", "current": "18.2.0", "available": "19.0.0"},
+                            {"package": "jest", "current": "~29.0.0", "available": "~30.0.0"},
+                        ]
+                    }
+                )
+            )
+            self.run_helper(root, plan)
+            self.assertEqual(json.loads(package.read_text()), original)
+            self.run_helper(root, plan, "--write")
+            updated = json.loads(package.read_text())
+            self.assertEqual(updated["catalog"], {"react": "^19.0.0", "jest": "~30.0.0"})
+            self.assertEqual(updated["overrides"], original["overrides"])
+
+    def test_conflicting_versions_and_stale_prefix_fail_without_writing(self) -> None:
+        for current, available in [("18.3.0", "19.0.0"), ("18.2.0", "20.0.0"), ("~18.2.0", "~19.0.0")]:
+            with self.subTest(current=current, available=available), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "package.json"
+                package.write_text(json.dumps({"catalog": {"react": "^18.2.0", "jest": "29.0.0"}}))
+                before = package.read_bytes()
+                plan = root / "plan.json"
+                plan.write_text(
+                    json.dumps(
+                        {
+                            "updates": [
+                                {"package": "react", "current": "~18.2.0", "available": "~19.0.0"},
+                                {"package": "react", "current": current, "available": available},
+                                {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
+                            ]
+                        }
+                    )
+                )
+                result = self.run_helper(root, plan, "--write", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(package.read_bytes(), before)
+
     def test_stale_plan_fails_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -58,28 +116,104 @@ class UpdateBunCatalogsTests(unittest.TestCase):
             package.write_text(json.dumps({"workspaces": {"catalog": {"react": "^18.3.0", "jest": "29.0.0"}}}))
             before = package.read_bytes()
             plan = root / "plan.json"
-            plan.write_text(json.dumps({"updates": [
-                {"package": "react", "current": "18.2.0", "available": "19.0.0"},
-                {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
-            ]}))
+            plan.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {"package": "react", "current": "18.2.0", "available": "19.0.0"},
+                            {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
+                        ]
+                    }
+                )
+            )
             result = self.run_helper(root, plan, "--write", check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(package.read_bytes(), before)
+
+    def test_selected_catalogs_match_each_current_and_preserve_peer_ranges_and_fixed_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package.json"
+            peers = {"react": ">=18.2.0", "jest": "29"}
+            original = {
+                "catalog": {"react": "^18.2.0", "jest": "29.0.0"},
+                "catalogs": {"dev": {"react": "~19.0.0"}, "peers": peers},
+            }
+            package.write_text(json.dumps(original))
+            plan = root / "plan.json"
+            plan.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {"package": "react", "current": "^18.2.0", "available": "^19.0.0"},
+                            {"package": "react", "current": "~19.0.0", "available": "~19.2.0"},
+                            {"package": "react", "current": ">=18.2.0", "available": ">=19.0.0"},
+                            {"package": "jest", "current": "29.0.0", "available": "30.0.0", "action": "skip-fixed"},
+                        ]
+                    }
+                )
+            )
+            preview = self.run_helper(root, plan, "--catalog", "default", "--catalog", "dev")
+            self.assertEqual(len(json.loads(preview.stdout)["changes"]), 2)
+            self.assertEqual(json.loads(package.read_text()), original)
+            self.run_helper(root, plan, "--catalog", "default", "--catalog", "dev", "--write")
+            updated = json.loads(package.read_text())
+            self.assertEqual(updated["catalog"], {"react": "^19.0.0", "jest": "29.0.0"})
+            self.assertEqual(updated["catalogs"]["dev"]["react"], "~19.2.0")
+            self.assertEqual(updated["catalogs"]["peers"], peers)
+
+    def test_unknown_catalog_and_ambiguous_target_fail_atomically(self) -> None:
+        for catalog in ["missing", "default"]:
+            with self.subTest(catalog=catalog), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "package.json"
+                package.write_text(json.dumps({"catalog": {"react": "^18.2.0", "jest": "~29.0.0"}}))
+                before = package.read_bytes()
+                plan = root / "plan.json"
+                plan.write_text(
+                    json.dumps(
+                        {
+                            "updates": [
+                                {"package": "react", "current": "^18.2.0", "available": "^19.0.0"},
+                                {"package": "jest", "current": "~29.0.0", "available": "~30.0.0"},
+                                {"package": "jest", "current": "~29.0.0", "available": "~31.0.0"},
+                            ]
+                        }
+                    )
+                )
+                result = self.run_helper(root, plan, "--catalog", catalog, "--write", check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "unknown Bun catalogs" if catalog == "missing" else "ambiguous plan targets", result.stderr
+                )
+                self.assertEqual(package.read_bytes(), before)
 
     def test_top_level_catalogs_are_updated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             package = root / "package.json"
-            package.write_text(json.dumps({
-                "catalog": {"react": "^18.2.0"},
-                "catalogs": {"testing": {"jest": "~29.0.0"}},
-                "workspaces": ["packages/*"],
-            }), encoding="utf-8")
+            package.write_text(
+                json.dumps(
+                    {
+                        "catalog": {"react": "^18.2.0"},
+                        "catalogs": {"testing": {"jest": "~29.0.0"}},
+                        "workspaces": ["packages/*"],
+                    }
+                ),
+                encoding="utf-8",
+            )
             plan = root / "plan.json"
-            plan.write_text(json.dumps({"updates": [
-                {"package": "react", "current": "18.2.0", "available": "19.0.0"},
-                {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
-            ]}), encoding="utf-8")
+            plan.write_text(
+                json.dumps(
+                    {
+                        "updates": [
+                            {"package": "react", "current": "18.2.0", "available": "19.0.0"},
+                            {"package": "jest", "current": "29.0.0", "available": "30.0.0"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             written = json.loads(self.run_helper(root, plan, "--write").stdout)
             self.assertTrue(written["wrote"])

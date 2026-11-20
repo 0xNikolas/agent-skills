@@ -1,0 +1,118 @@
+mod common;
+
+use std::path::PathBuf;
+
+use ai_skillet::cli::{Cli, Command, DoctorFormat, MapFormat};
+use clap::Parser;
+use predicates::prelude::*;
+
+#[test]
+fn version_reports_the_package_version() {
+    common::ai_skillet().arg("--version").assert().success().stdout(predicate::eq(concat!(
+        "ai-skillet ",
+        env!("CARGO_PKG_VERSION"),
+        "\n"
+    )));
+}
+
+#[test]
+fn map_help_lists_its_supported_options() {
+    common::ai_skillet()
+        .args(["map", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--root <PATH>"))
+        .stdout(predicate::str::contains("--portfolio-root <PATH>"))
+        .stdout(predicate::str::contains("--include-catalog-sources"))
+        .stdout(predicate::str::contains("--include-self"))
+        .stdout(predicate::str::contains("--include-snippets"))
+        .stdout(predicate::str::contains("--show-skipped"))
+        .stdout(predicate::str::contains("--format <FORMAT>"))
+        .stdout(predicate::str::contains("map scans $HOME but skips"))
+        .stdout(predicate::str::contains("Exit status:"));
+}
+
+#[test]
+fn doctor_help_lists_its_supported_options() {
+    common::ai_skillet()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--root <PATH>"))
+        .stdout(predicate::str::contains("--skill <NAME>"))
+        .stdout(predicate::str::contains("--dependencies-only"))
+        .stdout(predicate::str::contains("--fix-safe"))
+        .stdout(predicate::str::contains("--format <FORMAT>"))
+        .stdout(predicate::str::contains("stay report-only"))
+        .stdout(predicate::str::contains("1  the audit completed and findings remain"))
+        .stdout(predicate::str::contains("3  a requested safe fix failed"));
+}
+
+#[test]
+fn map_and_doctor_support_repeatable_roots_and_skills() {
+    for subcommand in ["map", "doctor"] {
+        let cli = Cli::try_parse_from([
+            "ai-skillet",
+            subcommand,
+            "--root",
+            "first",
+            "--root",
+            "second",
+            "--skill",
+            "alpha",
+            "--skill",
+            "beta",
+            "--format",
+            "json",
+        ])
+        .unwrap_or_else(|error| panic!("{subcommand} arguments should parse: {error}"));
+
+        let (root, skill, json) = match cli.command {
+            Command::Map(args) => (args.root, args.skill, args.format == MapFormat::Json),
+            Command::Doctor(args) => (args.root, args.skill, args.format == DoctorFormat::Json),
+        };
+        assert_eq!(root, [PathBuf::from("first"), PathBuf::from("second")], "{subcommand}");
+        assert_eq!(skill, ["alpha", "beta"], "{subcommand}");
+        assert!(json, "{subcommand}");
+    }
+}
+
+#[test]
+fn map_root_and_portfolio_root_are_mutually_exclusive() {
+    common::ai_skillet()
+        .args(["map", "--root", "catalog", "--portfolio-root", "portfolio"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn doctor_fix_safe_and_dependencies_only_are_mutually_exclusive() {
+    common::ai_skillet()
+        .args(["doctor", "--fix-safe", "--dependencies-only"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn missing_option_values_exit_with_usage_error() {
+    common::ai_skillet()
+        .args(["map", "--root"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("a value is required"));
+}
+
+#[test]
+fn unknown_subcommands_fail_with_a_clap_error() {
+    common::ai_skillet()
+        .arg("unknown")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("unrecognized subcommand 'unknown'"));
+}

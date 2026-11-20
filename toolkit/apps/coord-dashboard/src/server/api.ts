@@ -1,0 +1,184 @@
+import { readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import nodePath from "node:path";
+
+import type { HandoffRecord, HandoffsResponse } from "../lib/handoff-types.js";
+import { scanHandoffs } from "./handoffs/scanner.js";
+
+const API_ORIGIN = "http://127.0.0.1:4477";
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".jpg": "image/jpeg",
+  ".map": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+export type RequestHandlerOptions = {
+  distDirectory: string;
+  apiOrigin?: string;
+  proxyRequest?: (request: Request) => Promise<Response>;
+  homeDirectory?: string;
+  loadHandoffs?: () => Promise<HandoffRecord[]>;
+};
+
+// Loopback hostnames accepted to block DNS-rebinding attacks against this 127.0.0.1-bound server.
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTNAMES.has(hostname.toLowerCase());
+}
+
+function responseBody(method: string, bytes: Uint8Array): BodyInit | null {
+  return method === "HEAD" ? null : (bytes as BodyInit);
+}
+
+async function fileResponse(path: string, method: string): Promise<Response | null> {
+  try {
+    const metadata = await stat(path);
+    if (!metadata.isFile()) {
+      return null;
+    }
+    const bytes = new Uint8Array(await readFile(path));
+    return new Response(responseBody(method, bytes), {
+      headers: {
+        "Content-Length": String(bytes.byteLength),
+        "Content-Type": CONTENT_TYPES[nodePath.extname(path)] ?? "application/octet-stream",
+      },
+    });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    console.error(`[ai-coord-dashboard] unable to serve ${path}`, error);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+// Delivers the server's home directory to the client so it can abbreviate
+// paths to `~`, since browser JavaScript has no way to read it itself.
+function injectHomeDirectory(html: string, home: string): string {
+  const meta = `<meta name="dashboard-home" content="${escapeHtmlAttribute(home)}">`;
+  return html.includes("</head>") ? html.replace("</head>", `${meta}</head>`) : `${meta}${html}`;
+}
+
+async function indexResponse(
+  indexPath: string,
+  method: string,
+  home: string
+): Promise<Response | null> {
+  try {
+    const metadata = await stat(indexPath);
+    if (!metadata.isFile()) {
+      return null;
+    }
+    const html = injectHomeDirectory(await readFile(indexPath, "utf-8"), home);
+    const bytes = new TextEncoder().encode(html);
+    return new Response(responseBody(method, bytes), {
+      headers: {
+        "Content-Length": String(bytes.byteLength),
+        "Content-Type": "text/html; charset=utf-8",
+      },
+    });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    console.error(`[ai-coord-dashboard] unable to serve ${indexPath}`, error);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+}
+
+export function createRequestHandler(
+  options: RequestHandlerOptions
+): (request: Request) => Promise<Response> {
+  const distDirectory = nodePath.resolve(options.distDirectory);
+  const indexPath = nodePath.resolve(distDirectory, "index.html");
+  const apiOrigin = options.apiOrigin ?? API_ORIGIN;
+  const proxyRequest = options.proxyRequest ?? ((request: Request) => fetch(request));
+  const homeDirectory = options.homeDirectory ?? homedir();
+  const loadHandoffs = options.loadHandoffs ?? (() => scanHandoffs());
+
+  return async (request: Request): Promise<Response> => {
+    let url: URL;
+    try {
+      url = new URL(request.url);
+    } catch {
+      return new Response("Bad Request", { status: 400 });
+    }
+
+    if (!isLoopbackHost(url.hostname)) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    // Served here rather than by `ai-coord serve`: handoffs are read from disk, never from the ledger.
+    if (url.pathname === "/api/handoffs") {
+      if (request.method !== "GET") {
+        return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET" } });
+      }
+      try {
+        const payload: HandoffsResponse = { handoffs: await loadHandoffs() };
+        return Response.json(payload, { headers: { "Cache-Control": "no-store" } });
+      } catch (error) {
+        console.error("[ai-coord-dashboard] unable to load handoffs", error);
+        return new Response("Internal Server Error", { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      const upstream = new URL(`${url.pathname}${url.search}`, apiOrigin);
+      try {
+        return await proxyRequest(new Request(upstream, request));
+      } catch (error) {
+        console.error(`[ai-coord-dashboard] unable to reach ${upstream.origin}`, error);
+        return new Response("Bad Gateway", { status: 502 });
+      }
+    }
+
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method Not Allowed", {
+        status: 405,
+        headers: { Allow: "GET, HEAD" },
+      });
+    }
+
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      return new Response("Bad Request", { status: 400 });
+    }
+
+    const assetPath = nodePath.resolve(distDirectory, `.${decodedPath}`);
+    if (assetPath === distDirectory || assetPath.startsWith(`${distDirectory}${nodePath.sep}`)) {
+      const asset =
+        assetPath === indexPath
+          ? await indexResponse(indexPath, request.method, homeDirectory)
+          : await fileResponse(assetPath, request.method);
+      if (asset) {
+        return asset;
+      }
+    }
+
+    return (
+      (await indexResponse(indexPath, request.method, homeDirectory)) ??
+      new Response("Not Found", { status: 404 })
+    );
+  };
+}

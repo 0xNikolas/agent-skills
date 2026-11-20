@@ -31,9 +31,7 @@ REQUIRED_TOOLS = ("ocrmypdf", "pdfimages", "pdfinfo", "pdftocairo", "pdftotext",
 def run(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(args, capture_output=True, check=False, text=True)
     if check and result.returncode != 0:
-        raise AssertionError(
-            f"command failed: {shlex.join(args)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        raise AssertionError(f"command failed: {shlex.join(args)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
     return result
 
 
@@ -136,6 +134,19 @@ def test_profile(tmp: Path) -> tuple[Path, Path]:
     assert result.returncode == 1
     assert corrupt_payload["status"] == "error"
     assert corrupt_payload["error"]["code"] == "unreadable_pdf"
+
+    owner_only = tmp / "owner-only.pdf"
+    run(["qpdf", "--encrypt", "", "owner", "256", "--", str(digital), str(owner_only)])
+    _, owner_payload = run_json([sys.executable, str(PROFILE), str(owner_only)])
+    assert owner_payload["status"] == "ok"
+    assert owner_payload["encrypted"] is True
+    assert owner_payload["text"]["pages_with_text"] == [1, 2]
+
+    user_locked = tmp / "user-locked.pdf"
+    run(["qpdf", "--encrypt", "user", "owner", "256", "--", str(digital), str(user_locked)])
+    result, locked_payload = run_json([sys.executable, str(PROFILE), str(user_locked)], check=False)
+    assert result.returncode == 1
+    assert locked_payload["status"] == "password_required"
     return digital, scan
 
 
@@ -154,9 +165,7 @@ def test_forms(tmp: Path) -> None:
     values = tmp / "values.json"
     values.write_text(json.dumps({"person.name": "Ada Lovelace"}), encoding="utf-8")
     filled = tmp / "filled.pdf"
-    _, filled_payload = run_json(
-        [sys.executable, str(FORM), "fill", str(source), str(values), str(filled)]
-    )
+    _, filled_payload = run_json([sys.executable, str(FORM), "fill", str(source), str(values), str(filled)])
     assert filled_payload["fields_written"] == ["person.name"]
     _, filled_inspection = run_json([sys.executable, str(FORM), "inspect", str(filled)])
     assert filled_inspection["fields"][0]["value"] == "Ada Lovelace"
@@ -173,25 +182,18 @@ def test_forms(tmp: Path) -> None:
     assert not unknown_output.exists()
 
     original_filled = filled.read_bytes()
-    result, payload = run_json(
-        [sys.executable, str(FORM), "fill", str(source), str(values), str(filled)], check=False
-    )
+    result, payload = run_json([sys.executable, str(FORM), "fill", str(source), str(values), str(filled)], check=False)
     assert result.returncode == 1
     assert payload["error"]["code"] == "output_exists"
     assert filled.read_bytes() == original_filled
 
     flattened = tmp / "flattened.pdf"
-    run_json(
-        [sys.executable, str(FORM), "fill", str(source), str(values), str(flattened), "--flatten"]
-    )
+    run_json([sys.executable, str(FORM), "fill", str(source), str(values), str(flattened), "--flatten"])
     flattened_reader = PdfReader(str(flattened))
     flattened_root = flattened_reader.trailer["/Root"]
     assert "/AcroForm" not in flattened_root
     for page in flattened_reader.pages:
-        assert all(
-            str(reference.get_object().get("/Subtype")) != "/Widget"
-            for reference in page.get("/Annots", [])
-        )
+        assert all(str(reference.get_object().get("/Subtype")) != "/Widget" for reference in page.get("/Annots", []))
     assert_render_changed(source, flattened, tmp, "flattened")
 
     placements = tmp / "placements.json"
@@ -200,9 +202,7 @@ def test_forms(tmp: Path) -> None:
         encoding="utf-8",
     )
     overlaid = tmp / "overlaid.pdf"
-    _, overlay_payload = run_json(
-        [sys.executable, str(FORM), "overlay", str(flat), str(placements), str(overlaid)]
-    )
+    _, overlay_payload = run_json([sys.executable, str(FORM), "overlay", str(flat), str(placements), str(overlaid)])
     assert overlay_payload["placements_written"] == 1
     source_reader = PdfReader(str(flat))
     overlay_reader = PdfReader(str(overlaid))

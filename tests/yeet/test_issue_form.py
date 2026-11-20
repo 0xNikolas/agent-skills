@@ -7,22 +7,20 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from argparse import Namespace
-from pathlib import Path
 from contextlib import redirect_stderr
 from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_ROOT = REPO_ROOT / "skills" / "yeet"
 SCRIPT = SKILL_ROOT / "scripts" / "issue-form.py"
-FIXTURE = SKILL_ROOT / "fixtures" / "issue-form.yml"
+FIXTURE = Path(__file__).resolve().parent / "issue-form.yml"
 SPEC = importlib.util.spec_from_file_location("issue_form", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -96,7 +94,9 @@ CLI, Extension
         with self.assertRaisesRegex(MODULE.FormError, "missing required"):
             MODULE.render_form(self.form, {"terms": {"I searched for duplicates": True}, "operating-system": "macOS"})
         with self.assertRaisesRegex(MODULE.FormError, "invalid dropdown"):
-            MODULE.render_form(self.form, base | {"terms": {"I searched for duplicates": True}, "operating-system": "Windows"})
+            MODULE.render_form(
+                self.form, base | {"terms": {"I searched for duplicates": True}, "operating-system": "Windows"}
+            )
 
     def test_inspects_metadata_defaults_and_upload_accept(self) -> None:
         form = MODULE.inspect_form(
@@ -273,17 +273,18 @@ body:
         self.assertTrue(body.endswith("`````\n"))
 
     def test_malformed_gh_responses_and_missing_executable_are_form_errors(self) -> None:
-        args = Namespace(input=None, fixture=None, repo="acme/demo", template="bug.yml")
-        with patch.object(MODULE.subprocess, "run", side_effect=FileNotFoundError):
-            with self.assertRaisesRegex(MODULE.FormError, "gh executable not found"):
-                MODULE.load_yaml_text(args)
+        args = Namespace(input=None, repo="acme/demo", template="bug.yml")
+        with (
+            patch.object(MODULE.subprocess, "run", side_effect=FileNotFoundError),
+            self.assertRaisesRegex(MODULE.FormError, "gh executable not found"),
+        ):
+            MODULE.load_yaml_text(args)
         malformed = ["[]", '{"content": 4}', '{"type": "dir", "content": "eA=="}', '{"content": "not base64!"}']
         for output in malformed:
             with self.subTest(output=output):
                 result = subprocess.CompletedProcess(["gh"], 0, stdout=output, stderr="")
-                with patch.object(MODULE.subprocess, "run", return_value=result):
-                    with self.assertRaises(MODULE.FormError):
-                        MODULE.load_yaml_text(args)
+                with patch.object(MODULE.subprocess, "run", return_value=result), self.assertRaises(MODULE.FormError):
+                    MODULE.load_yaml_text(args)
 
     def test_malformed_render_forms_are_form_errors(self) -> None:
         bad_forms = [
@@ -293,9 +294,13 @@ body:
             {"schemaVersion": 1, "fields": [{"id": "x", "type": "input", "label": "X", "required": True}]},
         ]
         for form in bad_forms:
-            with self.subTest(form=form):
-                with self.assertRaises(MODULE.FormError):
-                    MODULE.render_form(form, {})
+            with self.subTest(form=form), self.assertRaises(MODULE.FormError):
+                MODULE.render_form(form, {})
+
+    def test_null_form_metadata_renders_as_empty(self) -> None:
+        form = {"schemaVersion": 1, "fields": [], "labels": None, "assignees": None, "projects": None}
+        posting = MODULE.render_form(form, {})["posting"]
+        self.assertEqual((posting["labels"], posting["assignees"], posting["projects"]), ([], [], []))
 
     def test_cli_maps_malformed_render_form_to_exit_64(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -303,13 +308,15 @@ body:
             answers_path = Path(directory) / "answers.json"
             form_path.write_text('{"schemaVersion": 1, "fields": [{}]}', encoding="utf-8")
             answers_path.write_text("{}", encoding="utf-8")
-            with patch.object(
-                sys,
-                "argv",
-                ["issue-form.py", "render", "--form", str(form_path), "--answers", str(answers_path)],
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    ["issue-form.py", "render", "--form", str(form_path), "--answers", str(answers_path)],
+                ),
+                redirect_stderr(StringIO()),
             ):
-                with redirect_stderr(StringIO()):
-                    self.assertEqual(MODULE.main(), 64)
+                self.assertEqual(MODULE.main(), 64)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,132 @@
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Parser)]
+#[command(name = "ai-commit", version, about)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Capture an immutable transaction without changing the shared index.
+    Prepare(PrepareArgs),
+    /// Validate a prepared transaction without creating a commit.
+    Validate(TransactionArgs),
+    /// Commit a previously prepared transaction.
+    Commit(CommitArgs),
+    /// Push the current named branch, optionally rebasing a behind branch first.
+    Push(PushArgs),
+    /// Show a transaction or retained receipt.
+    Show(TransactionArgs),
+    /// Discard a prepared transaction.
+    Discard(TransactionArgs),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum DiffMode {
+    #[default]
+    Summary,
+    Full,
+}
+
+#[derive(Debug, Args)]
+pub struct PrepareArgs {
+    /// Snapshot all worktree and index changes.
+    #[arg(long, conflicts_with = "staged")]
+    pub all: bool,
+
+    /// Snapshot the current index exactly.
+    #[arg(long, conflicts_with = "all")]
+    pub staged: bool,
+
+    /// Force Natural Language Format.
+    #[arg(long, conflicts_with = "conventional")]
+    pub natural: bool,
+
+    /// Force Conventional Prefix Format.
+    #[arg(long, conflicts_with = "natural")]
+    pub conventional: bool,
+
+    /// Include only a summary or the complete prepared diff.
+    #[arg(long, value_enum, default_value_t)]
+    pub diff: DiffMode,
+
+    /// Apply only baseline-to-worktree changes for path.
+    #[arg(long = "exclude-baseline", value_name = "PATH=OID")]
+    pub exclude_baselines: Vec<String>,
+
+    /// Do not discover stale-dirt baselines from ai-coord.
+    #[arg(long)]
+    pub no_auto_baseline: bool,
+
+    /// Emit stable tab-separated records.
+    #[arg(long)]
+    pub porcelain: bool,
+
+    /// Explicit intended paths. Place them after `--`.
+    #[arg(last = true)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CommitArgs {
+    pub transaction_id: String,
+
+    /// Commit message paragraph; use literal newlines and repeat for a body.
+    #[arg(short = 'm', long = "message", required = true, allow_hyphen_values = true)]
+    pub messages: Vec<String>,
+
+    /// Append a `Closes #N` line for one issue number; repeat for several issues.
+    #[arg(long = "close", value_name = "ISSUE", value_parser = parse_issue_number)]
+    pub close: Vec<u64>,
+
+    /// Append a `Finding-ID: <id>` trailer and, after the commit, resolve that ai-coord finding as
+    /// fixed with the commit OID; repeat for several findings.
+    #[arg(long = "finding", value_name = "ID", value_parser = parse_finding_id)]
+    pub findings: Vec<String>,
+
+    /// Push after creating or recovering the commit.
+    #[arg(long)]
+    pub push: bool,
+
+    /// Before pushing, rebase a behind branch onto its fetched upstream when the repository is idle and the working
+    /// tree and index are clean.
+    #[arg(long, requires = "push")]
+    pub rebase: bool,
+
+    /// Bypass pre-commit and commit-msg hooks.
+    #[arg(long)]
+    pub no_verify: bool,
+
+    /// Disable commit signing for this transaction attempt.
+    #[arg(long)]
+    pub no_gpg_sign: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct PushArgs {
+    /// Rebase a behind branch onto its fetched upstream when the repository is idle and the working tree and index are
+    /// clean.
+    #[arg(long)]
+    pub rebase: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TransactionArgs {
+    pub transaction_id: String,
+}
+
+fn parse_issue_number(value: &str) -> Result<u64, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) || value.starts_with('0') {
+        return Err(format!("issue number must be a positive decimal integer, got {value:?}"));
+    }
+    value.parse().map_err(|_| format!("issue number is out of range: {value}"))
+}
+
+fn parse_finding_id(value: &str) -> Result<String, String> {
+    if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        return Err(format!("finding ID must contain only ASCII letters, digits, '-', '_' or '.', got {value:?}"));
+    }
+    Ok(value.to_owned())
+}

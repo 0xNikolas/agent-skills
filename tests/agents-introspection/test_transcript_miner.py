@@ -14,9 +14,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MINER = REPO_ROOT / "skills/agents-introspection/scripts/transcript-miner.py"
+FIXTURE_TIMESTAMP = (dt.datetime.now(dt.UTC) - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class MinerFixture:
@@ -45,18 +45,20 @@ class MinerFixture:
         context: str | None = None,
         extra: list[dict[str, Any]] | None = None,
         session_meta: bool = True,
+        native_metadata: dict[str, Any] | None = None,
         turn_cwds: list[Path] | None = None,
         session_dir: Path | None = None,
+        timestamp: str | None = FIXTURE_TIMESTAMP,
     ) -> Path:
         records: list[dict[str, Any]] = []
         if session_meta:
-            records.append(
-                {
-                    "timestamp": "2026-08-08T12:00:00Z",
-                    "type": "session_meta",
-                    "payload": {"id": session_id, "cwd": str(cwd)},
-                }
-            )
+            meta: dict[str, Any] = {
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(cwd), **(native_metadata or {})},
+            }
+            if timestamp is not None:
+                meta["timestamp"] = timestamp
+            records.append(meta)
         for turn_cwd in turn_cwds or []:
             records.append({"type": "turn_context", "payload": {"cwd": str(turn_cwd)}})
         if context is not None:
@@ -78,16 +80,17 @@ class MinerFixture:
         *,
         user: str | None = None,
         assistant: str | None = None,
+        timestamp: str = FIXTURE_TIMESTAMP,
     ) -> Path:
         project_dir = self.claude_home / "projects" / encode_claude_project(directory_project)
         project_dir.mkdir(parents=True, exist_ok=True)
         records: list[dict[str, Any]] = []
         if user is not None:
-            records.append(claude_message("user", session_id, cwd, user))
+            records.append(claude_message("user", session_id, cwd, user, timestamp))
         if assistant is not None:
-            records.append(claude_message("assistant", session_id, cwd, assistant))
+            records.append(claude_message("assistant", session_id, cwd, assistant, timestamp))
         if not records:
-            records.append(claude_message("user", session_id, cwd, "placeholder"))
+            records.append(claude_message("user", session_id, cwd, "placeholder", timestamp))
         path = project_dir / f"{session_id}.jsonl"
         write_jsonl(path, records)
         return path
@@ -105,10 +108,14 @@ class MinerFixture:
         output_format: str = "json",
         since: str | None = None,
         excerpts: bool = False,
+        max_excerpt_bytes: int | None = None,
+        historical_projects: list[Path] | None = None,
     ) -> Any:
         command = [sys.executable, str(MINER)]
         for project in projects:
             command.extend(["--project", str(project)])
+        for project in historical_projects or []:
+            command.extend(["--historical-project", str(project)])
         for keyword in keywords:
             command.extend(["--keyword", keyword])
         command.extend(["--max-sessions", "100", "--format", output_format])
@@ -118,6 +125,8 @@ class MinerFixture:
             command.extend(["--since", since])
         if excerpts:
             command.append("--excerpts")
+        if max_excerpt_bytes is not None:
+            command.extend(["--max-excerpt-bytes", str(max_excerpt_bytes)])
         env = os.environ.copy()
         env.update(
             {
@@ -126,7 +135,7 @@ class MinerFixture:
             }
         )
         env.pop("CODEX_THREAD_ID", None)
-        env.pop("CLAUDE_SESSION_ID", None)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
         env.update(env_updates or {})
         result = subprocess.run(command, text=True, capture_output=True, check=False, env=env)
         if result.returncode != 0:
@@ -141,6 +150,113 @@ class TranscriptMinerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_absent_historical_root_matches_native_codex_and_claude_ownership(self) -> None:
+        current = self.fixture.project("agent-skills")
+        former = self.fixture.project("agent-toolkit")
+        self.fixture.codex_session("historical-codex", former / "src", user="needle")
+        self.fixture.claude_session(former, "historical-claude", former, user="needle")
+        self.fixture.history([{"sessionId": "historical-claude", "project": str(former), "display": "needle"}])
+        self.fixture.codex_session(
+            "historical-guardian",
+            former,
+            user="needle",
+            native_metadata={"source": {"subagent": {"other": "guardian"}}, "parent_thread_id": "historical-codex"},
+        )
+        former.rmdir()
+
+        report = self.fixture.run([current], ["needle"], historical_projects=[former, former])
+
+        self.assertEqual([project["path"] for project in report["projects"]], [str(current), str(former)])
+        sessions = report["candidate_sessions"]
+        self.assertEqual({session["source"] for session in sessions}, {"codex", "claude"})
+        self.assertEqual(len(sessions), 2)
+        self.assertTrue(all(session["project"] == str(former) for session in sessions))
+        self.assertTrue(all(session["ownership"]["project"] == str(former) for session in sessions))
+        self.assertEqual(coverage_by_project(report)[former]["guardian_sessions_excluded"], 1)
+
+    def test_historical_roots_preserve_current_validation_and_default(self) -> None:
+        former = self.fixture.projects / "missing-former"
+        missing_current = self.fixture.projects / "missing-current"
+        with self.assertRaisesRegex(AssertionError, r"miner failed \(2\):\ntranscript-miner: project does not exist:"):
+            self.fixture.run([missing_current], [], historical_projects=[former])
+        report = self.fixture.run([], [], historical_projects=[former])
+        self.assertEqual(
+            [project["path"] for project in report["projects"]], [str(Path.cwd().resolve()), str(former.resolve())]
+        )
+        not_directory = self.fixture.projects / "former-file"
+        not_directory.write_text("not a directory", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "historical project is not a directory"):
+            self.fixture.run([], [], historical_projects=[not_directory])
+
+    def test_guardians_are_excluded_before_copied_history_can_rank(self) -> None:
+        project = self.fixture.project("alpha")
+        guardian = self.fixture.codex_session(
+            "guardian",
+            project,
+            native_metadata={
+                "source": {"subagent": {"other": "guardian"}},
+                "thread_source": "subagent",
+                "parent_thread_id": "primary",
+                "subagent_history_start_ordinal": 40,
+            },
+            extra=[message_record("user", f"needle correction {index}") for index in range(100)],
+        )
+        primary = self.fixture.codex_session("primary", project, user="needle", native_metadata={"source": "cli"})
+
+        report = self.fixture.run([project], ["needle"], include_current=True)
+
+        self.assertEqual([session["path"] for session in report["candidate_sessions"]], [str(primary.resolve())])
+        self.assertNotIn(str(guardian.resolve()), json.dumps(report["candidate_sessions"]))
+        coverage = coverage_by_project(report)[project]
+        self.assertEqual(coverage["guardian_sessions_excluded"], 1)
+        self.assertEqual(coverage["codex_candidates"], 1)
+        self.assertEqual(coverage["relevance_matched"], 1)
+        text = self.fixture.run([project], ["needle"], output_format="text")
+        self.assertIn("guardian=1", text)
+
+    def test_primary_child_and_unknown_lineage_preserve_ownership(self) -> None:
+        project = self.fixture.project("alpha")
+        metadata = {
+            "cli": {"source": "cli", "thread_source": "user"},
+            "vscode": {"source": "vscode"},
+            "child": {"source": {"subagent": {"other": "worker"}}, "parent_thread_id": "cli"},
+            "thread-child": {"thread_source": "subagent"},
+            "parent-child": {"parent_thread_id": "cli"},
+            "unknown": {"source": "unrecognized"},
+            "missing": {},
+        }
+        paths = {
+            name: self.fixture.codex_session(name, project, user="needle", native_metadata=fields).resolve()
+            for name, fields in metadata.items()
+        }
+        report = self.fixture.run([project], ["needle"])
+        sessions = {Path(session["path"]): session for session in report["candidate_sessions"]}
+        self.assertEqual(set(sessions), set(paths.values()))
+        for name, path in paths.items():
+            expected = "primary" if name in {"cli", "vscode"} else "subagent" if "child" in name else "unknown"
+            self.assertEqual(sessions[path]["session_kind"], expected)
+            self.assertEqual(sessions[path]["parent_session_id"], "cli" if name in {"child", "parent-child"} else None)
+            self.assertEqual(sessions[path]["ownership"]["matched_via"], "session_meta.payload.cwd")
+            self.assertEqual(sessions[path]["ownership"]["project"], str(project))
+
+    def test_claude_sidechain_is_not_message_parent_lineage(self) -> None:
+        project = self.fixture.project("alpha")
+        for name, marker in (("primary", False), ("child", True), ("unknown", None)):
+            path = self.fixture.claude_session(project, name, project, user="needle")
+            record = claude_message("user", name, project, "needle")
+            record["parentUuid"] = "previous-message-uuid"
+            if marker is not None:
+                record["isSidechain"] = marker
+            write_jsonl(path, [record])
+
+        report = self.fixture.run([project], ["needle"])
+        sessions = {Path(session["path"]).stem: session for session in report["candidate_sessions"]}
+        self.assertEqual(
+            {name: session["session_kind"] for name, session in sessions.items()},
+            {"primary": "primary", "child": "subagent", "unknown": "unknown"},
+        )
+        self.assertTrue(all(session["parent_session_id"] is None for session in sessions.values()))
 
     def test_content_mentions_never_assign_foreign_projects(self) -> None:
         project_a = self.fixture.project("alpha")
@@ -198,7 +314,9 @@ class TranscriptMinerTests(unittest.TestCase):
 
         report = self.fixture.run([project], ["needle"])
 
-        self.assertEqual([Path(session["path"]).stem for session in report["candidate_sessions"]], ["rollout-real-user"])
+        self.assertEqual(
+            [Path(session["path"]).stem for session in report["candidate_sessions"]], ["rollout-real-user"]
+        )
         self.assertEqual(report["candidate_sessions"][0]["signal_channels"]["eligible_user_messages"], 1)
 
     def test_keyword_hits_are_deduplicated_and_failures_cannot_qualify(self) -> None:
@@ -229,7 +347,7 @@ class TranscriptMinerTests(unittest.TestCase):
         self.fixture.codex_session("codex-live", project, user="needle")
         self.fixture.claude_session(project, "claude-live", project, user="needle")
         self.fixture.history([{"project": str(project), "sessionId": "claude-live", "display": "needle"}])
-        env = {"CODEX_THREAD_ID": "codex-live", "CLAUDE_SESSION_ID": "claude-live"}
+        env = {"CODEX_THREAD_ID": "codex-live", "CLAUDE_CODE_SESSION_ID": "claude-live"}
 
         default_report = self.fixture.run([project], ["needle"], env_updates=env)
         included_report = self.fixture.run([project], ["needle"], include_current=True, env_updates=env)
@@ -241,7 +359,10 @@ class TranscriptMinerTests(unittest.TestCase):
     def test_claude_history_finds_old_session_behind_newer_irrelevant_files(self) -> None:
         project = self.fixture.project("history")
         history = [{"project": str(project), "sessionId": "old", "display": "needle task"}]
-        self.fixture.claude_session(project, "old", project, user="needle task")
+        old = self.fixture.claude_session(project, "old", project, user="needle task")
+        tool_results = old.parent / old.stem / "tool-results"
+        tool_results.mkdir(parents=True)
+        (tool_results / "toolu_spilled.txt").write_text("spilled output", encoding="utf-8")
         for index in range(70):
             session_id = f"new-{index:02d}"
             self.fixture.claude_session(project, session_id, project, user="unrelated")
@@ -253,6 +374,7 @@ class TranscriptMinerTests(unittest.TestCase):
         claude_sessions = [session for session in report["candidate_sessions"] if session["source"] == "claude"]
         self.assertEqual([Path(session["path"]).stem for session in claude_sessions], ["old"])
         self.assertEqual(coverage_by_project(report)[project]["claude_scanned"], 71)
+        self.assertEqual(coverage_by_project(report)[project]["claude_tool_result_files"], 1)
 
     def test_conflicting_claude_ownership_is_ambiguous(self) -> None:
         project_a = self.fixture.project("claude-a")
@@ -386,11 +508,13 @@ class TranscriptMinerTests(unittest.TestCase):
         self.fixture.codex_session("recent", project, user="needle recent")
         old_dir = self.fixture.codex_home / "sessions" / "2020" / "01" / "01"
         old_codex = self.fixture.codex_session("old", project, user="needle old", session_dir=old_dir)
-        old_mtime = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=400)).timestamp()
+        old_mtime = (dt.datetime.now(dt.UTC) - dt.timedelta(days=400)).timestamp()
         os.utime(old_codex, (old_mtime, old_mtime))
         revived_dir = self.fixture.codex_home / "sessions" / "2020" / "02" / "02"
         self.fixture.codex_session("revived", project, user="needle revived recently", session_dir=revived_dir)
-        self.fixture.codex_session("flat", project, user="needle flat layout", session_dir=self.fixture.codex_home / "sessions")
+        self.fixture.codex_session(
+            "flat", project, user="needle flat layout", session_dir=self.fixture.codex_home / "sessions"
+        )
 
         self.fixture.claude_session(project, "recent-claude", project, user="needle recent claude")
         old_claude = self.fixture.claude_session(project, "old-claude", project, user="needle old claude")
@@ -413,6 +537,56 @@ class TranscriptMinerTests(unittest.TestCase):
         self.assertIn("recent-claude", stems)
         self.assertNotIn("old-claude", stems)
 
+    def test_since_confirms_fresh_mtime_with_last_record_timestamp(self) -> None:
+        project = self.fixture.project("since-content")
+        stale = (dt.datetime.now(dt.UTC) - dt.timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.fixture.codex_session("stale-content", project, user="needle stale", timestamp=stale)
+        self.fixture.codex_session("fresh-content", project, user="needle fresh")
+        self.fixture.codex_session("no-timestamp", project, user="needle missing", timestamp=None)
+        self.fixture.codex_session("bad-timestamp", project, user="needle bad", timestamp="not-a-date")
+        self.fixture.claude_session(project, "stale-claude", project, user="needle stale", timestamp=stale)
+        self.fixture.claude_session(project, "fresh-claude", project, user="needle fresh")
+
+        report = self.fixture.run([project], ["needle"], since="60d")
+
+        self.assertEqual(report["since"]["codex_files_pruned_by_timestamp"], 1)
+        self.assertEqual(report["since"]["claude_files_pruned_by_timestamp"], 1)
+        self.assertEqual(report["since"]["codex_files_pruned"], 0)
+        self.assertEqual(report["since"]["claude_files_pruned"], 0)
+        sessions = {Path(session["path"]).stem: session for session in report["candidate_sessions"]}
+        self.assertEqual(
+            set(sessions),
+            {"rollout-fresh-content", "rollout-no-timestamp", "rollout-bad-timestamp", "fresh-claude"},
+        )
+        self.assertEqual(sessions["rollout-fresh-content"]["started"], FIXTURE_TIMESTAMP)
+        self.assertIsNone(sessions["rollout-no-timestamp"]["started"])
+        self.assertIsNone(sessions["rollout-bad-timestamp"]["started"])
+
+    def test_excerpt_budget_truncates_and_sets_flag(self) -> None:
+        project = self.fixture.project("excerpt-budget")
+        for index in range(5):
+            self.fixture.codex_session(
+                f"budget-{index}",
+                project,
+                user=f"needle request {index} " + "detail " * 60,
+                assistant=f"needle answer {index} " + "result " * 60,
+            )
+
+        unbounded = self.fixture.run([project], ["needle"], excerpts=True)
+        bounded = self.fixture.run([project], ["needle"], excerpts=True, max_excerpt_bytes=1000)
+        text = self.fixture.run([project], ["needle"], excerpts=True, max_excerpt_bytes=1000, output_format="text")
+
+        self.assertFalse(unbounded["excerpts_truncated"])
+        self.assertEqual(sum(len(session["excerpts"]) for session in unbounded["candidate_sessions"]), 10)
+        self.assertTrue(bounded["excerpts_truncated"])
+        kept = [excerpt for session in bounded["candidate_sessions"] for excerpt in session["excerpts"]]
+        self.assertTrue(kept)
+        self.assertLess(len(kept), 10)
+        self.assertLessEqual(sum(len(json.dumps(excerpt).encode("utf-8")) for excerpt in kept), 1000)
+        self.assertIn("Excerpts truncated", text)
+        with self.assertRaisesRegex(AssertionError, r"miner failed \(2\)"):
+            self.fixture.run([project], ["needle"], excerpts=True, max_excerpt_bytes=0)
+
     def test_or_group_keyword_counts_one_hit_per_message(self) -> None:
         project = self.fixture.project("or-group")
         self.fixture.codex_session(
@@ -425,6 +599,52 @@ class TranscriptMinerTests(unittest.TestCase):
 
         session = report["candidate_sessions"][0]
         self.assertEqual(session["keyword_hits"], {"miner|mining|transcript-miner": 1})
+
+    def test_keywords_match_regular_inflections_but_not_longer_words(self) -> None:
+        project = self.fixture.project("inflections")
+        self.fixture.codex_session(
+            "inflected",
+            project,
+            user="the agent kept overwriting my verified files after I committed them",
+        )
+        self.fixture.codex_session("short-word", project, user="I retried the command while merging")
+        self.fixture.codex_session("longer-word", project, user="please retrieve the file")
+        self.fixture.codex_session("derived-word", project, user="mining the data took a while")
+
+        report = self.fixture.run([project], ["overwrite", "verify", "commit"])
+        session = report["candidate_sessions"][0]
+        self.assertEqual(Path(session["path"]).stem, "rollout-inflected")
+        self.assertEqual(session["keyword_hits"], {"overwrite": 1, "verify": 1, "commit": 1})
+
+        report = self.fixture.run([project], ["committed|overwritten"])
+        self.assertEqual([Path(s["path"]).stem for s in report["candidate_sessions"]], ["rollout-inflected"])
+
+        report = self.fixture.run([project], ["retry", "merge"])
+        self.assertEqual([Path(s["path"]).stem for s in report["candidate_sessions"]], ["rollout-short-word"])
+        self.assertEqual(report["candidate_sessions"][0]["keyword_hits"], {"retry": 1, "merge": 1})
+
+        report = self.fixture.run([project], ["miner"])
+        self.assertEqual(report["candidate_sessions"], [])
+
+    def test_keyword_free_pass_keeps_every_owned_session_and_ranks_by_signals(self) -> None:
+        project = self.fixture.project("signals-only")
+        self.fixture.codex_session("quiet", project, user="implement the feature", assistant="done")
+        self.fixture.codex_session(
+            "corrected",
+            project,
+            user="actually that is wrong, follow AGENTS.md instructions",
+            assistant="fixed and tests pass",
+        )
+
+        report = self.fixture.run([project], [])
+
+        stems = [Path(session["path"]).stem for session in report["candidate_sessions"]]
+        self.assertEqual(stems, ["rollout-corrected", "rollout-quiet"])
+        self.assertEqual(report["candidate_sessions"][0]["keyword_hits"], {})
+        self.assertTrue(report["candidate_sessions"][0]["correction_signals"])
+        coverage = coverage_by_project(report)[project]
+        self.assertEqual(coverage["structurally_matched"], 2)
+        self.assertEqual(coverage["relevance_matched"], 2)
 
     def test_prescan_keeps_user_matches_and_gate_still_excludes_body_only_matches(self) -> None:
         project = self.fixture.project("prescan")
@@ -466,6 +686,128 @@ class TranscriptMinerTests(unittest.TestCase):
         session = report["candidate_sessions"][0]
         self.assertRegex(session["modified"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
+    def test_codex_head_finds_metadata_after_noise_and_with_any_json_spacing(self) -> None:
+        project = self.fixture.project("alpha")
+        other = self.fixture.project("beta")
+        noise = [json.dumps(message_record("developer", f"noise {index}")) for index in range(5)]
+        spaced = json.dumps({"type": "session_meta", "payload": {"id": "late-meta", "cwd": str(project)}})
+        compact = json.dumps(
+            {"payload": {"id": "compact-meta", "cwd": str(project)}, "type": "session_meta"}, separators=(",", ":")
+        )
+        guardian = json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "late-guardian",
+                    "cwd": str(project),
+                    "source": {"subagent": {"other": "guardian"}},
+                },
+            }
+        )
+        turn_only = json.dumps({"type": "turn_context", "payload": {"cwd": str(other)}})
+        user = json.dumps(message_record("user", "needle"))
+        sessions = self.fixture.codex_sessions
+        (sessions / "rollout-late-meta.jsonl").write_text("\n".join([*noise, spaced, user]) + "\n")
+        (sessions / "rollout-compact-meta.jsonl").write_text("\n".join([*noise, compact, user]) + "\n")
+        (sessions / "rollout-late-guardian.jsonl").write_text("\n".join([*noise, guardian, user]) + "\n")
+        (sessions / "rollout-turn-only.jsonl").write_text("\n".join([*noise, turn_only, user]) + "\n")
+
+        report = self.fixture.run([project, other], ["needle"], env_updates={"CODEX_THREAD_ID": "compact-meta"})
+        by_name = {Path(session["path"]).stem: session for session in report["candidate_sessions"]}
+
+        self.assertEqual(set(by_name), {"rollout-late-meta", "rollout-turn-only"})
+        self.assertEqual(by_name["rollout-late-meta"]["ownership"]["matched_via"], "session_meta.payload.cwd")
+        self.assertEqual(by_name["rollout-late-meta"]["project"], str(project))
+        self.assertEqual(by_name["rollout-turn-only"]["ownership"]["matched_via"], "turn_context.cwd")
+        self.assertEqual(by_name["rollout-turn-only"]["project"], str(other))
+        coverage = coverage_by_project(report)
+        self.assertEqual(coverage[project]["guardian_sessions_excluded"], 1)
+        self.assertEqual(coverage[project]["current_sessions_excluded"], 1)
+
+    def test_codex_head_flags_multiple_session_meta_cwds_after_noise_as_ambiguous(self) -> None:
+        project_a = self.fixture.project("alpha")
+        project_b = self.fixture.project("beta")
+        lines = [
+            json.dumps(message_record("developer", "noise")),
+            json.dumps({"type": "session_meta", "payload": {"id": "mixed", "cwd": str(project_a)}}),
+            json.dumps(message_record("developer", "noise")),
+            json.dumps({"type": "session_meta", "payload": {"id": "mixed", "cwd": str(project_b)}}),
+            json.dumps(message_record("user", "needle")),
+        ]
+        (self.fixture.codex_sessions / "rollout-mixed.jsonl").write_text("\n".join(lines) + "\n")
+
+        report = self.fixture.run([project_a, project_b], ["needle"])
+
+        self.assertEqual(report["candidate_sessions"], [])
+        coverage = coverage_by_project(report)
+        self.assertEqual(coverage[project_a]["ambiguous_ownership_excluded"], 1)
+        self.assertEqual(coverage[project_b]["ambiguous_ownership_excluded"], 1)
+
+    def test_codex_head_skips_malformed_and_blank_lines_and_keeps_the_record_window(self) -> None:
+        project = self.fixture.project("alpha")
+        meta = json.dumps({"type": "session_meta", "payload": {"id": "window", "cwd": str(project)}})
+        user = json.dumps(message_record("user", "needle"))
+        malformed = '{"type": "session_meta", "payload": {"id": "broken", "cwd": '
+        inside = [malformed, "", "not json", '{"type": "turn_context"', meta]
+        # Malformed and blank lines count toward the 100-line head window.
+        inside_window = [*inside, *[""] * 94, user]
+        self.assertEqual(inside_window.index(meta), 4)
+        (self.fixture.codex_sessions / "rollout-inside.jsonl").write_text("\n".join(inside_window) + "\n")
+        edge = [malformed, *[""] * 98, meta, user]
+        self.assertEqual(edge.index(meta), 99)
+        (self.fixture.codex_sessions / "rollout-edge.jsonl").write_text("\n".join(edge) + "\n")
+        outside = [malformed, *[""] * 99, meta, user]
+        self.assertEqual(outside.index(meta), 100)
+        (self.fixture.codex_sessions / "rollout-outside.jsonl").write_text("\n".join(outside) + "\n")
+
+        report = self.fixture.run([project], ["needle"])
+
+        names = {Path(session["path"]).stem for session in report["candidate_sessions"]}
+        self.assertEqual(names, {"rollout-inside", "rollout-edge"})
+
+    def test_codex_head_tolerates_invalid_utf8_in_skipped_lines(self) -> None:
+        project = self.fixture.project("alpha")
+        meta = json.dumps({"type": "session_meta", "payload": {"id": "bytes", "cwd": str(project)}})
+        user = json.dumps(message_record("user", "needle"))
+        path = self.fixture.codex_sessions / "rollout-bytes.jsonl"
+        path.write_bytes(
+            b'{"type":"noise","text":"\xff\xfe"}\n'
+            + b'{"type":"session_meta","x":"\xff"}\n'
+            + meta.encode()
+            + b"\n"
+            + user.encode()
+            + b"\n"
+        )
+
+        report = self.fixture.run([project], ["needle"])
+
+        self.assertEqual([Path(session["path"]).stem for session in report["candidate_sessions"]], ["rollout-bytes"])
+
+    def test_single_project_run_counts_no_content_only_mentions(self) -> None:
+        project = self.fixture.project("alpha")
+        self.fixture.codex_session("solo", project, user=f"needle in {project}")
+        self.fixture.codex_session("solo-body", project, user="plain", assistant=f"needle in {project}")
+
+        report = self.fixture.run([project], ["needle"])
+
+        self.assertEqual(len(report["candidate_sessions"]), 2)
+        coverage = coverage_by_project(report)[project]
+        self.assertEqual(coverage["content_only_project_mentions_ignored"], 0)
+        self.assertEqual(coverage["structurally_matched"], 2)
+
+    def test_keyword_free_single_project_run_walks_records_only_for_foreign_projects(self) -> None:
+        project_a = self.fixture.project("alpha")
+        project_b = self.fixture.project("beta")
+        self.fixture.codex_session("own", project_a, user=f"see {project_a}")
+        self.fixture.codex_session("mentions", project_a, user=f"compare {project_b}")
+
+        report = self.fixture.run([project_a, project_b], [])
+
+        coverage = coverage_by_project(report)
+        self.assertEqual(coverage[project_b]["content_only_project_mentions_ignored"], 1)
+        self.assertEqual(coverage[project_a]["content_only_project_mentions_ignored"], 0)
+        self.assertEqual(coverage[project_a]["structurally_matched"], 2)
+
 
 def message_record(role: str, text: str) -> dict[str, Any]:
     content_type = "input_text" if role in {"user", "developer", "system"} else "output_text"
@@ -479,12 +821,14 @@ def message_record(role: str, text: str) -> dict[str, Any]:
     }
 
 
-def claude_message(role: str, session_id: str, cwd: Path, text: str) -> dict[str, Any]:
+def claude_message(
+    role: str, session_id: str, cwd: Path, text: str, timestamp: str = FIXTURE_TIMESTAMP
+) -> dict[str, Any]:
     return {
         "type": role,
         "sessionId": session_id,
         "cwd": str(cwd),
-        "timestamp": "2026-08-08T12:00:00Z",
+        "timestamp": timestamp,
         "message": {"role": role, "content": [{"type": "text", "text": text}]},
     }
 

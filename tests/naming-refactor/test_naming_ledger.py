@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "skills" / "naming-refactor" / "scripts" / "naming-ledger.py"
 
@@ -27,7 +26,7 @@ def make_repo(root: Path) -> Path:
 
 class NamingLedgerTests(unittest.TestCase):
     def helper(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run([sys.executable, str(SCRIPT), *args], text=True, capture_output=True)
+        result = subprocess.run([sys.executable, str(SCRIPT), *args], check=False, text=True, capture_output=True)
         if check:
             self.assertEqual(result.returncode, 0, result.stderr)
         return result
@@ -47,9 +46,7 @@ class NamingLedgerTests(unittest.TestCase):
             (repo / "ignored").write_text("ignored\n")
             ledger = root / "ledger.json"
 
-            initialized = json.loads(
-                self.helper("init", "--root", str(repo), "--ledger", str(ledger)).stdout
-            )
+            initialized = json.loads(self.helper("init", "--root", str(repo), "--ledger", str(ledger)).stdout)
             self.assertEqual(initialized["counts"]["mapped"], 4)
             self.assertEqual(initialized["preexistingChangedPaths"], 2)
             payload = json.loads(ledger.read_text())
@@ -83,6 +80,40 @@ class NamingLedgerTests(unittest.TestCase):
             )
             self.assertTrue(final["complete"])
             self.assertEqual(final["counts"]["accounted"], 4)
+
+    def test_untracked_paths_match_ls_files_others(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root)
+            (repo / ".gitignore").write_text("ignored/\n*.log\n!keep.log\n")
+            (repo / "moved.py").write_text("v = 1\n")
+            git(repo, "add", ".gitignore", "moved.py")
+            git(repo, "commit", "-qm", "initial")
+            (repo / "ignored").mkdir()
+            (repo / "ignored" / "f.txt").write_text("x\n")
+            (repo / "x.log").write_text("x\n")
+            (repo / "keep.log").write_text("x\n")
+            (repo / "deep" / "er").mkdir(parents=True)
+            (repo / "deep" / "er" / "u.txt").write_text("x\n")
+            (repo / "with space.txt").write_text("x\n")
+            (repo / "caf\u00e9.txt").write_text("x\n")
+            git(repo, "mv", "moved.py", "renamed.py")
+            (repo / "moved.py").write_text("v = 2\n")
+            ledger = root / "ledger.json"
+            self.helper("init", "--root", str(repo), "--ledger", str(ledger))
+            recorded = {item["path"] for item in json.loads(ledger.read_text())["files"]}
+            listed = subprocess.run(
+                ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                capture_output=True,
+                check=True,
+            ).stdout
+            expected = {value.decode() for value in listed.split(b"\0") if value}
+            self.assertEqual(recorded, expected)
+            self.assertIn("moved.py", recorded)
+            self.assertIn("deep/er/u.txt", recorded)
+            self.assertIn("keep.log", recorded)
+            self.assertNotIn("x.log", recorded)
+            self.assertNotIn("ignored/f.txt", recorded)
 
     def test_mark_is_atomic_and_blocked_prevents_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -151,11 +182,7 @@ class NamingLedgerTests(unittest.TestCase):
                 b"excluded\tc.py\tgenerated fixture\r\n"
             )
 
-            result = json.loads(
-                self.helper(
-                    "mark", "--ledger", str(ledger), "--from-file", str(dispositions)
-                ).stdout
-            )
+            result = json.loads(self.helper("mark", "--ledger", str(ledger), "--from-file", str(dispositions)).stdout)
             self.assertEqual(result["applied"], 3)
             self.assertEqual(result["skipped"], [])
             self.assertEqual(result["revision"], refreshed["revision"] + 1)
@@ -171,6 +198,65 @@ class NamingLedgerTests(unittest.TestCase):
             self.assertEqual(by_path["c.py"]["status"], "excluded")
             self.assertEqual(by_path["c.py"]["reason"], "generated fixture")
 
+    def test_mark_from_file_promotes_pending_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root)
+            for path in ("a.py", "b.py", "c.py"):
+                (repo / path).write_text(f"{path} = 1\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-qm", "initial")
+            ledger = root / "ledger.json"
+            self.helper("init", "--root", str(repo), "--ledger", str(ledger))
+            dispositions = root / "dispositions.tsv"
+            dispositions.write_text("pending\ta.py\tplanned: rename group 1\nretained\tb.py\t\npending\tc.py\t\n")
+
+            failed = self.helper(
+                "mark",
+                "--ledger",
+                str(ledger),
+                "--from-file",
+                str(dispositions),
+                "--pending-as",
+                "blocked",
+                check=False,
+            )
+            self.assertEqual(failed.returncode, 64)
+            self.assertIn("blocked status requires a reason", failed.stderr)
+
+            result = json.loads(
+                self.helper(
+                    "mark",
+                    "--ledger",
+                    str(ledger),
+                    "--from-file",
+                    str(dispositions),
+                    "--pending-as",
+                    "renamed",
+                ).stdout
+            )
+            self.assertEqual(result["applied"], 3)
+            self.assertTrue(result["complete"])
+            by_path = {item["path"]: item for item in json.loads(ledger.read_text())["files"]}
+            self.assertEqual(by_path["a.py"]["status"], "renamed")
+            self.assertEqual(by_path["a.py"]["reason"], "planned: rename group 1")
+            self.assertEqual(by_path["b.py"]["status"], "retained")
+            self.assertEqual(by_path["c.py"]["status"], "renamed")
+
+            invalid = self.helper(
+                "mark",
+                "--ledger",
+                str(ledger),
+                "--status",
+                "renamed",
+                "--path",
+                "a.py",
+                "--pending-as",
+                "renamed",
+                check=False,
+            )
+            self.assertEqual(invalid.returncode, 2)
+
     def test_mark_from_file_unknown_paths_fail_closed_or_skip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -183,9 +269,7 @@ class NamingLedgerTests(unittest.TestCase):
             self.helper("init", "--root", str(repo), "--ledger", str(ledger))
             dispositions = root / "dispositions.tsv"
             dispositions.write_text(
-                "retained\ta.py\t\n"
-                "excluded\tcache.stats.csv\tignored cache\n"
-                "renamed\tempty-directory\tdelegated path\n"
+                "retained\ta.py\t\nexcluded\tcache.stats.csv\tignored cache\nrenamed\tempty-directory\tdelegated path\n"
             )
             before = ledger.read_bytes()
 
@@ -303,6 +387,26 @@ class NamingLedgerTests(unittest.TestCase):
                 self.helper("mark", "--ledger", str(ledger), "--status", "renamed", "--path", "clear-name.py").stdout
             )
             self.assertTrue(final["complete"])
+
+    def test_refresh_reopens_retained_paths_that_were_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = make_repo(root)
+            (repo / "a.py").write_text("a = 1\n")
+            git(repo, "add", "a.py")
+            git(repo, "commit", "-qm", "initial")
+            ledger = root / "ledger.json"
+            self.helper("init", "--root", str(repo), "--ledger", str(ledger))
+            retained = json.loads(
+                self.helper("mark", "--ledger", str(ledger), "--status", "retained", "--path", "a.py").stdout
+            )
+            self.assertTrue(retained["complete"])
+
+            (repo / "a.py").unlink()
+            refreshed = json.loads(self.helper("refresh", "--ledger", str(ledger)).stdout)
+            self.assertFalse(refreshed["complete"])
+            self.assertEqual(refreshed["counts"]["pending"], 1)
+            self.assertEqual(refreshed["revision"], retained["revision"] + 1)
 
 
 if __name__ == "__main__":

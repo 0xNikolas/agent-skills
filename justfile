@@ -3,20 +3,26 @@ set allow-duplicate-recipes
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set unstable
 
+# Rust CLIs and Bun apps from toolkit/ (run as `just toolkit::<recipe>`)
+mod toolkit
+
 # ---------------------------------------------------------------------------- #
 #                                  VARIABLES                                   #
 # ---------------------------------------------------------------------------- #
 
 prettier := "bunx --no-install prettier"
+ruff := "uvx ruff@0.17.1"
 prettier_cache := ".cache/prettier/.prettier-cache"
 prettier_globs := "\"**/*.{md,json,jsonc,yaml,yml}\""
 evm_atlas_generator := "scripts/generate-evm-atlas.ts"
-skill_invocation_script := "scripts/sync-invocation-policy.ts"
+evm_atlas_generator_test := "scripts/generate-evm-atlas.test.ts"
+debank_collect_test := "tests/evm-atlas/debank-collect.test.ts"
+llm_finder_test := "tests/llm-finder/gateway-models.test.ts"
 publish_skills_script := "scripts/publish-skills.ts"
 publish_skills_test := "scripts/publish-skills.test.ts"
-readme_skills_script := "scripts/readme-skills-check.ts"
-codex_handoff_runner_test := "tests/codex-handoff/test-run-codex-handoff.sh"
-codex_handoff_wave_test := "tests/codex-handoff/test-watch-codex-wave.py"
+orchestration_runner_test := "tests/orchestration/test-run-codex-agent.sh"
+orchestration_wave_test := "tests/orchestration/test-watch-codex-wave.py"
+node_deps_bumper_test := "tests/node-deps-bumper/test_taze_direct.mjs"
 
 # ---------------------------------------------------------------------------- #
 #                                 ENTRYPOINTS                                  #
@@ -76,6 +82,18 @@ alias pw := prettier-write
 @pre-commit:
     sh .husky/pre-commit
 
+# Lint and check formatting of Python files; pass paths to scope
+[group("checks")]
+@python-check *paths:
+    {{ ruff }} check {{ paths }}
+    {{ ruff }} format --check {{ paths }}
+
+# Apply safe lint fixes and format Python files; pass paths to scope
+[group("checks")]
+@python-fix *paths:
+    {{ ruff }} check --fix {{ paths }}
+    {{ ruff }} format {{ paths }}
+
 # Run every Python test script
 [group("checks")]
 @python-test:
@@ -92,21 +110,26 @@ alias pw := prettier-write
 @bats-test *paths:
     if [ "$#" -eq 0 ]; then bats --recursive tests; else bats --recursive "$@"; fi
 
+# Run the node-deps-bumper Node tests
+[group("checks")]
+@node-deps-bumper-test:
+    node --test {{ node_deps_bumper_test }}
+
 # Lint repository shell scripts and tests
 [group("checks")]
 [positional-arguments]
 @shell-check *paths:
-    if [ "$#" -eq 0 ]; then shellcheck skills/*/scripts/*.sh tests/*/*.sh tests/*/*.bats; else shellcheck "$@"; fi
+    if [ "$#" -eq 0 ]; then shellcheck mcp/*.sh skills/*/scripts/*.sh tests/*/*.sh tests/*/*.bats; else shellcheck "$@"; fi
 
-# Run every repository test suite
+# Run every test suite, the Python and TypeScript checks, and the evm-atlas freshness check
 [group("checks")]
-@test: python-test shell-test bats-test
+@test: python-check python-test shell-test bats-test node-deps-bumper-test publish-skills-test evm-atlas-test llm-finder-test typescript-check evm-atlas-check
 
-# Exercise the Codex handoff runner and wave watcher
+# Exercise the orchestration Codex runner and wave watcher
 [group("checks")]
-@codex-handoff-test:
-    bash {{ codex_handoff_runner_test }}
-    uv run python {{ codex_handoff_wave_test }}
+@orchestration-test:
+    bash {{ orchestration_runner_test }}
+    uv run python {{ orchestration_wave_test }}
 
 # Regenerate evm-atlas references from crypto-registry's canonical chain JSON + atlas overlays
 [group("checks")]
@@ -120,29 +143,39 @@ alias eag := evm-atlas-generate
     bun run {{ evm_atlas_generator }} --check
 alias eac := evm-atlas-check
 
+# Exercise the evm-atlas generator against fixture registries and the DeBank collector against a simulated page
+[group("checks")]
+@evm-atlas-test:
+    bun test {{ evm_atlas_generator_test }} {{ debank_collect_test }}
+alias eat := evm-atlas-test
+
+# Exercise the llm-finder Gateway catalog helper against provider fixtures
+[group("checks")]
+@llm-finder-test:
+    bun test {{ llm_finder_test }}
+
 # Refresh atlas-overlays.json routeMesh flags through the routemesh CLI (network call)
 [group("checks")]
 @evm-atlas-discover-routemesh:
     bun run {{ evm_atlas_generator }} --discover-routemesh
 alias eadr := evm-atlas-discover-routemesh
 
-# Check SKILL.md invocation fields against agents/openai.yaml
+# Check skill invocation metadata, README skill tables, and dependencies for drift
 [group("checks")]
-@skill-invocation-check:
-    bun run {{ skill_invocation_script }}
-alias sic := skill-invocation-check
+@skill-check:
+    ai-skillet doctor --root .
+alias sc := skill-check
 
-# Update agents/openai.yaml invocation policy from SKILL.md
+# Apply safe fixes for skill invocation metadata, README skill tables, and dependencies
 [group("checks")]
-@skill-invocation-fix:
-    bun run {{ skill_invocation_script }} --fix
-alias sif := skill-invocation-fix
+@skill-fix:
+    ai-skillet doctor --root . --fix-safe
+alias sf := skill-fix
 
-# Check skill dependency declarations
+# List model identifier mentions in skills as file:line:text rows to update after a model release, rename, or retirement
 [group("checks")]
-@skill-dependencies-check:
-    ai-skillet doctor --root . --dependencies-only
-alias sdc := skill-dependencies-check
+@model-refs:
+    scripts/model-refs.sh
 
 # Check source-owned global skill installations and CLI metadata for drift
 [group("checks")]
@@ -156,13 +189,82 @@ alias psc := publish-skills-check
     bun test {{ publish_skills_test }}
 alias pst := publish-skills-test
 
-# Check README skills tables match skills/ directories
-[group("checks")]
-@readme-skills-check:
-    bun run {{ readme_skills_script }}
-alias rsc := readme-skills-check
-
 # Type-check Bun TypeScript helper scripts without emitting JavaScript
+[group("checks")]
 @typescript-check:
     bunx --no-install tsc --noEmit
 alias tsc := typescript-check
+
+# ---------------------------------------------------------------------------- #
+#                                   PUBLISH                                    #
+# ---------------------------------------------------------------------------- #
+
+# Plan, claim every target repository, and apply catalog skill publication; pass --skill NAME to scope
+[group("publish")]
+[positional-arguments]
+[script("bash")]
+publish-skills *args:
+    set -euo pipefail
+    work_dir=$(mktemp -d "${TMPDIR:-/tmp}/publish-skills.XXXXXX")
+    trap 'rm -rf "$work_dir"' EXIT
+    plan_file="$work_dir/plan.json"
+    claims_file="$work_dir/claims.tsv"
+    tab=$(printf '\t')
+
+    bun run {{ publish_skills_script }} plan --json "$@" >"$plan_file"
+    if [ "$(jq -r '.version' "$plan_file")" != 2 ]; then
+        echo "error: expected publish-skills plan JSON version 2" >&2
+        exit 1
+    fi
+    if [ "$(jq -r '.clean' "$plan_file")" = true ]; then
+        echo "No publish-skills drift; nothing to publish."
+        exit 0
+    fi
+    head=$(jq -r '.head' "$plan_file")
+    echo "Plan head: $head"
+
+    # One row per claim scope, keyed by the physical repository root.
+    jq -r '.repos[] | .root as $root | .paths[] | [$root, .scope, .path] | @tsv' "$plan_file" |
+        while IFS="$tab" read -r root scope claim_path; do
+            canonical_root=$(cd "$root" && pwd -P)
+            printf '%s\t%s\t%s\n' "$canonical_root" "$scope" "$claim_path"
+        done >"$claims_file"
+    root_count=$(cut -f1 "$claims_file" | sort -u | wc -l | tr -d ' ')
+
+    start_args=()
+    bundle_args=()
+    while IFS="$tab" read -r root scope claim_path; do
+        if [ "$scope" = recursive ]; then
+            start_args+=(--recursive "$claim_path")
+            bundle_args+=(--recursive "$root/$claim_path")
+        else
+            start_args+=("$claim_path")
+            bundle_args+=("$root/$claim_path")
+        fi
+    done <"$claims_file"
+
+    if [ "$root_count" -eq 0 ]; then
+        echo "No target repository paths to claim; the helper's process lock covers CLI metadata cleanup."
+    else
+        if [ "$root_count" -eq 1 ]; then
+            claim_root=$(cut -f1 "$claims_file" | sort -u)
+            claim_command=(ai-coord start 'publish catalog skills' "${start_args[@]}")
+        else
+            claim_root=$PWD
+            claim_command=(ai-coord bundle start 'publish catalog skills' "${bundle_args[@]}")
+        fi
+        if claim_output=$(cd "$claim_root" && "${claim_command[@]}"); then claim_rc=0; else claim_rc=$?; fi
+        case "$claim_rc:$claim_output" in
+            0:READY*) printf '%s\n' "$claim_output" ;;
+            *)
+                printf '%s\n' "$claim_output" >&2
+                echo 'Target claims are not READY: run `ai-coord wait`, then rerun `just publish-skills`.' >&2
+                exit 1
+                ;;
+        esac
+    fi
+
+    bun run {{ publish_skills_script }} apply --expected-head "$head" "$@"
+    if [ "$root_count" -gt 0 ]; then
+        echo 'Next: commit and push the reported global paths per repository, then run `ai-coord done` once.'
+    fi

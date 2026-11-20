@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { withCommittedSkillSource } from "./committed-skill-source";
 
 type InstallTarget = "claude-code" | "codex" | "shared";
 type Drift = { kind: string; skill: string; target: string };
-type RepoClaim = { canonical: boolean; paths: Array<{ path: string; scope: "file" | "recursive" }>; root: string };
+type RepoClaim = { paths: Array<{ path: string; scope: "file" | "recursive" }>; root: string };
 type PlanJson = {
   clean: boolean;
   drifts: Drift[];
@@ -51,6 +52,128 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { force: true, recursive: true });
 });
 
+test("committed check ignores staged, working-tree, untracked, and deleted source changes", () => {
+  const fixture = createFixture();
+  const skills = path.join(fixture.sourceRoot, "skills");
+  fs.appendFileSync(path.join(skills, "alpha", "SKILL.md"), "staged\n");
+  fs.chmodSync(path.join(skills, "alpha", "scripts", "run.sh"), 0o644);
+  writeSkill(fixture.sourceRoot, "staged-new", "shared");
+  git(fixture.sourceRoot, "add", "skills");
+  fs.appendFileSync(path.join(skills, "alpha", "SKILL.md"), "unstaged\n");
+  fs.writeFileSync(path.join(skills, "beta", "SKILL.md"), skillMarkdown("beta", "codex"));
+  writeSkill(fixture.sourceRoot, "untracked-new", "shared");
+  git(fixture.sourceRoot, "rm", "-rq", "skills/gamma");
+  const committed = runJson(fixture, "check", "--committed", "--json");
+  assert.equal(committed.result.status, 0, committed.result.stderr);
+  assert.equal(committed.json.clean, true);
+  assert.equal(committed.json.selectedCount, 3);
+  assert.equal(committed.json.head, fixture.head);
+  const ordinary = runJson(fixture, "check", "--json");
+  assert.equal(ordinary.result.status, 1, ordinary.result.stderr);
+  for (const name of ["alpha", "beta", "gamma", "staged-new", "untracked-new"]) {
+    assert(ordinary.json.driftSkills.includes(name), name);
+  }
+  fs.rmSync(skills, { recursive: true });
+  assert.equal(run(fixture, "check", "--committed").status, 0);
+});
+
+test("committed check detects committed unpublished changes, additions, and deletions", () => {
+  const fixture = createFixture();
+  fs.appendFileSync(path.join(fixture.sourceRoot, "skills", "alpha", "SKILL.md"), "committed\n");
+  writeSkill(fixture.sourceRoot, "new-skill", "shared");
+  git(fixture.sourceRoot, "rm", "-rq", "skills/gamma");
+  git(fixture.sourceRoot, "add", "skills");
+  git(fixture.sourceRoot, "commit", "-m", "unpublished skills");
+  const { json, result } = runJson(fixture, "check", "--committed", "--json");
+  assert.equal(result.status, 1, result.stderr);
+  assert(hasDrift(json, "alpha", "content"));
+  assert(hasDrift(json, "alpha", "lock-skill-folder-hash"));
+  assert(hasDrift(json, "new-skill", "missing"));
+  assert(hasDrift(json, "gamma", "deleted-install"));
+});
+
+test("committed check preserves installed content, mode, layout, symlink, and lock checks", () => {
+  const fixture = createFixture();
+  fs.appendFileSync(path.join(fixture.agentsRoot, "skills", "alpha", "SKILL.md"), "drift\n");
+  fs.chmodSync(path.join(fixture.agentsRoot, "skills", "gamma", "scripts", "run.sh"), 0o644);
+  fs.rmSync(path.join(fixture.claudeRoot, "skills", "alpha"));
+  fs.symlinkSync("wrong", path.join(fixture.claudeRoot, "skills", "alpha"));
+  fs.mkdirSync(path.join(fixture.codexRoot, "skills", "beta"), { recursive: true });
+  const lock = readLock(fixture);
+  lock.skills.beta!.sourceUrl = "wrong";
+  writeLock(fixture, lock);
+  const { json, result } = runJson(fixture, "check", "--committed", "--json");
+  assert.equal(result.status, 1, result.stderr);
+  for (const [name, kind] of [
+    ["alpha", "content"],
+    ["alpha", "symlink"],
+    ["gamma", "mode"],
+    ["beta", "forbidden-copy"],
+    ["beta", "lock-source-url"],
+  ])
+    assert(hasDrift(json, name!, kind!));
+});
+
+test("committed snapshots preserve blob bytes and modes, ignore archive attributes, pin HEAD, and clean up", () => {
+  const fixture = createFixture();
+  const skill = path.join(fixture.sourceRoot, "skills", "alpha");
+  fs.symlinkSync("scripts/run.sh", path.join(skill, "run-link"));
+  fs.writeFileSync(path.join(skill, "binary"), Buffer.from([0, 10, 255, 1]));
+  fs.writeFileSync(path.join(skill, ".gitattributes"), "binary export-ignore\nSKILL.md export-subst\n");
+  git(fixture.sourceRoot, "add", "skills");
+  git(fixture.sourceRoot, "commit", "-m", "objects");
+  const head = git(fixture.sourceRoot, "rev-parse", "HEAD");
+  const installed = path.join(fixture.agentsRoot, "skills", "alpha");
+  fs.symlinkSync("scripts/run.sh", path.join(installed, "run-link"));
+  fs.copyFileSync(path.join(skill, "binary"), path.join(installed, "binary"));
+  fs.copyFileSync(path.join(skill, ".gitattributes"), path.join(installed, ".gitattributes"));
+  const lock = readLock(fixture);
+  lock.skills.alpha = lockEntry(fixture, "alpha");
+  writeLock(fixture, lock);
+  assert.equal(run(fixture, "check", "--committed").status, 0);
+  fs.rmSync(path.join(skill, "run-link"));
+  fs.symlinkSync("different", path.join(skill, "run-link"));
+  assert.equal(run(fixture, "check", "--committed").status, 0);
+  fs.rmSync(path.join(installed, "run-link"));
+  fs.symlinkSync("different", path.join(installed, "run-link"));
+  assert.equal(run(fixture, "check", "--committed").status, 1);
+  let snapshotRoot = "";
+  withCommittedSkillSource(fixture.sourceRoot, (snapshot) => {
+    snapshotRoot = snapshot.root;
+    git(fixture.sourceRoot, "commit", "--allow-empty", "-m", "advance HEAD");
+    assert.equal(snapshot.head, head);
+    assert(snapshot.files.includes("skills/alpha/binary"));
+    const root = path.join(snapshot.root, "skills", "alpha");
+    assert.deepEqual(fs.readFileSync(path.join(root, "binary")), Buffer.from([0, 10, 255, 1]));
+    assert.equal(fs.readlinkSync(path.join(root, "run-link")), "scripts/run.sh");
+    assert.equal(fs.statSync(path.join(root, "scripts", "run.sh")).mode & 0o111, 0o111);
+  });
+  assert.equal(fs.existsSync(snapshotRoot), false);
+  assert.throws(
+    () =>
+      withCommittedSkillSource(fixture.sourceRoot, (snapshot) => {
+        snapshotRoot = snapshot.root;
+        throw new Error("inspection failed");
+      }),
+    /inspection failed/,
+  );
+  assert.equal(fs.existsSync(snapshotRoot), false);
+});
+
+test("committed check accepts the folder hash fallback and rejects use with plan or apply", () => {
+  const fixture = createFixture();
+  const lock = readLock(fixture);
+  lock.skills.alpha!.skillFolderHash = "c9000b024f254c44c09681569da510500d6e5fa3e77b33772fe77e0c721356b9";
+  writeLock(fixture, lock);
+  assert.equal(run(fixture, "check", "--committed", "--skill", "alpha").status, 0);
+  for (const command of ["plan", "apply"]) {
+    const result = run(fixture, command, "--committed");
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /--committed is available only for check/);
+  }
+  assert.equal(fs.existsSync(fixture.commandLog), false);
+});
+
 test("plan and check cover clean shared and restricted installs, content, modes, and filters", () => {
   const fixture = createFixture();
   const clean = runJson(fixture, "plan", "--json");
@@ -72,7 +195,7 @@ test("plan and check cover clean shared and restricted installs, content, modes,
   assert(alpha.json.drifts.some((drift) => drift.skill === "alpha" && drift.kind === "content"));
   assert(!alpha.json.drifts.some((drift) => drift.skill === "beta"));
   assert.deepEqual(alpha.json.repos, [
-    { canonical: true, paths: [{ path: "skills/alpha", scope: "recursive" }], root: fixture.agentsRoot },
+    { paths: [{ path: "skills/alpha", scope: "recursive" }], root: fixture.agentsRoot },
   ]);
 
   const gamma = runJson(fixture, "plan", "--json", "--skill", "gamma");
@@ -103,10 +226,7 @@ test("planner detects target layout, symlink, deletion, and stale lock metadata"
     recursive: true,
   });
   fs.symlinkSync(
-    path.relative(
-      path.join(fixture.claudeRoot, "skills"),
-      path.join(fixture.agentsRoot, "skills", "gone"),
-    ),
+    path.relative(path.join(fixture.claudeRoot, "skills"), path.join(fixture.agentsRoot, "skills", "gone")),
     path.join(fixture.claudeRoot, "skills", "gone"),
   );
 
@@ -127,7 +247,6 @@ test("planner detects target layout, symlink, deletion, and stale lock metadata"
   const claudeClaim = json.repos.find((claim) => claim.root === fixture.claudeRoot);
   assert(agentsClaim, "expected an agents-root claim");
   assert(claudeClaim, "expected a claude-root claim");
-  assert.equal(agentsClaim.canonical, true);
   assert.deepEqual(
     agentsClaim.paths.find((entry) => entry.path === "skills/gone"),
     { path: "skills/gone", scope: "recursive" },
@@ -136,6 +255,23 @@ test("planner detects target layout, symlink, deletion, and stale lock metadata"
     claudeClaim.paths.find((entry) => entry.path === "skills/gone"),
     { path: "skills/gone", scope: "file" },
   );
+});
+
+test("planner accepts the skills CLI SHA-256 folder hash fallback", () => {
+  const fixture = createFixture();
+  const lock = readLock(fixture);
+  // skills@1.7.0 computeSkillFolderHash output for the alpha fixture skill.
+  lock.skills.alpha = lockEntry(fixture, "alpha", {
+    skillFolderHash: "c9000b024f254c44c09681569da510500d6e5fa3e77b33772fe77e0c721356b9",
+  });
+  lock.skills.beta = lockEntry(fixture, "beta", { skillFolderHash: "0".repeat(64) });
+  writeLock(fixture, lock);
+
+  assert.equal(run(fixture, "check", "--skill", "alpha").status, 0);
+  const { json, result } = runJson(fixture, "plan", "--json");
+  assert.equal(result.status, 0, result.stderr);
+  assert(!json.drifts.some((drift) => drift.skill === "alpha"));
+  assert(hasDrift(json, "beta", "lock-skill-folder-hash"));
 });
 
 test("planner rejects invalid source and CLI lock metadata", () => {
@@ -159,6 +295,25 @@ test("planner rejects invalid source and CLI lock metadata", () => {
   assert.match(versionResult.stderr, /expected skills CLI lock version 3/);
 });
 
+test("planner reads install targets from any valid YAML metadata layout", () => {
+  const fixture = createFixture();
+  const skillsRoot = path.join(fixture.sourceRoot, "skills");
+  fs.writeFileSync(
+    path.join(skillsRoot, "beta", "SKILL.md"),
+    "---\nmetadata:\n    install-targets: 'claude-code'\nname: beta\ndescription: beta\n---\n",
+  );
+  fs.writeFileSync(
+    path.join(skillsRoot, "gamma", "SKILL.md"),
+    "---\nmetadata: { install-targets: codex }\nname: gamma\ndescription: gamma\n---\n",
+  );
+
+  const { json, result } = runJson(fixture, "plan", "--json");
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(json.groups.claude, ["beta"]);
+  assert.deepEqual(json.groups.codex, ["gamma"]);
+  assert.deepEqual(json.groups.remove, []);
+});
+
 test("planner rejects frontmatter name that does not match its directory", () => {
   const fixture = createFixture();
   const skillFile = path.join(fixture.sourceRoot, "skills", "beta", "SKILL.md");
@@ -169,7 +324,7 @@ test("planner rejects frontmatter name that does not match its directory", () =>
   assert.match(result.stderr, /does not match directory/);
 });
 
-test("pure-remove plans mark the only claimed repository canonical", () => {
+test("pure-remove plans claim only the installed repository", () => {
   const fixture = createFixture();
   const lock = readLock(fixture);
   lock.skills.gone = lockEntry(fixture, "alpha", { skillPath: "skills/gone/SKILL.md" });
@@ -181,9 +336,7 @@ test("pure-remove plans mark the only claimed repository canonical", () => {
   const { json, result } = runJson(fixture, "plan", "--json", "--skill", "gone");
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(json.groups.remove, ["gone"]);
-  assert.deepEqual(json.repos, [
-    { canonical: true, paths: [{ path: "skills/gone", scope: "recursive" }], root: fixture.agentsRoot },
-  ]);
+  assert.deepEqual(json.repos, [{ paths: [{ path: "skills/gone", scope: "recursive" }], root: fixture.agentsRoot }]);
 });
 
 test("apply batches one remove and one add per target group, then verifies clean state", () => {
@@ -200,9 +353,32 @@ test("apply batches one remove and one add per target group, then verifies clean
   assert.match(result.stdout, /Apply completed and verified/);
   const commands = readCommandLog(fixture);
   assert.equal(commands.length, 4);
+  assert(commands.every((args) => args[0] === "skills@1.7.0"));
   assert.deepEqual(commands.map(commandKind), ["remove", "shared", "claude", "codex"]);
   assert.equal(run(fixture, "check").status, 0);
   assert.equal(readLock(fixture).skills.gone, undefined);
+});
+
+test("scoped check accepts a completed source deletion but still rejects unknown names", () => {
+  const fixture = createFixture();
+  git(fixture.sourceRoot, "rm", "-rq", "skills/gamma");
+  git(fixture.sourceRoot, "commit", "-m", "delete gamma");
+  git(fixture.sourceRoot, "push");
+
+  const applied = run(
+    fixture,
+    "apply",
+    "--expected-head",
+    git(fixture.sourceRoot, "rev-parse", "HEAD"),
+    "--skill",
+    "gamma",
+  );
+  assert.equal(applied.status, 0, applied.stderr);
+  const checked = run(fixture, "check", "--skill", "gamma");
+  assert.equal(checked.status, 0, checked.stderr);
+  const unknown = run(fixture, "check", "--skill", "never-existed");
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /Unknown source-owned skill: never-existed/);
 });
 
 test("apply guards reject dirty sources, HEAD and upstream mismatches, malformed locks, and concurrent runs", () => {

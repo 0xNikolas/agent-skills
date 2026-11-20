@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { type CommittedSkillSource, withCommittedSkillSource } from "./committed-skill-source";
 
 type Command = "apply" | "check" | "plan";
 type InstallTarget = "claude" | "codex" | "shared";
@@ -15,6 +16,7 @@ type NodeKind = "directory" | "file" | "missing" | "other" | "symlink";
 
 type CliOptions = {
   command: Command;
+  committed: boolean;
   expectedHead: string | null;
   json: boolean;
   skills: string[];
@@ -62,10 +64,12 @@ type ProcessLock = { owner: string; token: string };
 type GlobalChanges = { lockChanged: boolean; paths: string[] };
 type TargetPaths = Record<"agents" | "claude" | "codex", string>;
 type ClaimScope = "file" | "recursive";
-type RepoClaim = { canonical: boolean; paths: Array<{ path: string; scope: ClaimScope }>; root: string };
+type RepoClaim = { paths: Array<{ path: string; scope: ClaimScope }>; root: string };
 
 const repository = "0xNikolas/agent-skills";
 const sourceUrl = "https://github.com/0xNikolas/agent-skills.git";
+// Pinned: apply requires the v3 global lock format this release writes.
+const skillsCli = "skills@1.7.0";
 const validSkillName = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const scriptRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const homeDir = os.homedir();
@@ -91,9 +95,13 @@ try {
   if (options.command === "apply") {
     process.exitCode = await applyPlan(options);
   } else {
-    const plan = createPlan(options.skills);
-    printPlan(plan, options.json, options.skills);
-    if (options.command === "check" && plan.drifts.length > 0) process.exitCode = 1;
+    const check = (source?: CommittedSkillSource): void => {
+      const plan = createPlan(options.skills, { source });
+      printPlan(plan, options.json, options.skills, source?.head);
+      if (options.command === "check" && plan.drifts.length > 0) process.exitCode = 1;
+    };
+    if (options.committed) withCommittedSkillSource(config.sourceRoot, check);
+    else check();
   }
 } catch (error) {
   console.error(`Error: ${errorMessage(error)}`);
@@ -104,14 +112,25 @@ function parseArgs(args: string[]): CliOptions {
   const command = args.shift();
   if (!command || !["apply", "check", "plan"].includes(command)) {
     throw new Error(
-      "Usage: publish-skills.ts plan|check [--json] [--skill NAME]... | " +
+      "Usage: publish-skills.ts check [--committed] [--json] [--skill NAME]... | plan [--json] [--skill NAME]... | " +
         "apply --expected-head SHA [--skill NAME]...",
     );
   }
 
-  const options: CliOptions = { command: command as Command, expectedHead: null, json: false, skills: [] };
+  const options: CliOptions = {
+    command: command as Command,
+    committed: false,
+    expectedHead: null,
+    json: false,
+    skills: [],
+  };
   while (args.length > 0) {
     const flag = args.shift();
+    if (flag === "--committed") {
+      if (command !== "check") throw new Error("--committed is available only for check.");
+      options.committed = true;
+      continue;
+    }
     if (flag === "--json") {
       if (command === "apply") throw new Error("--json is available only for plan and check.");
       options.json = true;
@@ -139,15 +158,23 @@ function parseArgs(args: string[]): CliOptions {
   return options;
 }
 
-function createPlan(requestedSkills: string[], { emptyMeansAll = true }: { emptyMeansAll?: boolean } = {}): Plan {
-  const sourceSkills = readSourceSkills();
+function createPlan(
+  requestedSkills: string[],
+  { emptyMeansAll = true, source }: { emptyMeansAll?: boolean; source?: CommittedSkillSource } = {},
+): Plan {
+  const sourceSkills = readSourceSkills(source?.root, source?.files);
   const lock = readCliLock();
   const sourceOwnedLockNames = Object.entries(lock.data.skills)
     .filter(([, entry]) => isObject(entry) && entry.source === repository)
     .map(([name]) => name);
   const candidateNames = [...new Set([...sourceSkills.keys(), ...sourceOwnedLockNames])].sort();
   const selected = requestedSkills.length > 0 ? requestedSkills : emptyMeansAll ? candidateNames : [];
-  const unknown = selected.filter((name) => !candidateNames.includes(name));
+  // A completed deletion leaves no source or lock entry; its name stays valid while source history has it.
+  const unknown = selected.filter(
+    (name) =>
+      !candidateNames.includes(name) &&
+      !git(["log", "-1", "--format=%H", source?.head ?? "HEAD", "--", `skills/${name}`]),
+  );
   if (unknown.length > 0)
     throw new Error(`Unknown source-owned skill${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 
@@ -157,14 +184,16 @@ function createPlan(requestedSkills: string[], { emptyMeansAll = true }: { empty
     const skill = sourceSkills.get(name);
     const lockEntry = lock.data.skills[name];
     if (!skill) {
-      addDrift(
-        drifts,
-        name,
-        "source",
-        "deleted",
-        path.join(config.sourceRoot, "skills", name),
-        "source skill was deleted",
-      );
+      if (candidateNames.includes(name)) {
+        addDrift(
+          drifts,
+          name,
+          "source",
+          "deleted",
+          path.join(config.sourceRoot, "skills", name),
+          "source skill was deleted",
+        );
+      }
       inspectDeletedTargets(name, drifts);
       continue;
     }
@@ -199,9 +228,8 @@ function createPlan(requestedSkills: string[], { emptyMeansAll = true }: { empty
   };
 }
 
-function readSourceSkills(): Map<string, SourceSkill> {
-  const skillsRoot = path.join(config.sourceRoot, "skills");
-  const sourceFiles = readSourceFileIndex();
+function readSourceSkills(root = config.sourceRoot, sourceFiles = readSourceFileIndex()): Map<string, SourceSkill> {
+  const skillsRoot = path.join(root, "skills");
   let entries;
   try {
     entries = fs.readdirSync(skillsRoot, { withFileTypes: true });
@@ -247,54 +275,33 @@ function readSourceFileIndex(): string[] {
     .filter((sourcePath) => sourcePath && nodeKind(path.join(config.sourceRoot, sourcePath)) !== "missing");
 }
 
-function readFrontmatter(skillFile: string): string {
+function readFrontmatter(skillFile: string): Record<string, unknown> {
   const text = fs.readFileSync(skillFile, "utf8");
-  const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
-  if (frontmatter === undefined) throw new Error(`${skillFile}: missing YAML frontmatter.`);
+  const block = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+  if (block === undefined) throw new Error(`${skillFile}: missing YAML frontmatter.`);
+  let frontmatter: unknown;
+  try {
+    frontmatter = Bun.YAML.parse(block);
+  } catch (error) {
+    throw new Error(`${skillFile}: malformed YAML frontmatter: ${errorMessage(error)}`);
+  }
+  if (!isObject(frontmatter)) throw new Error(`${skillFile}: YAML frontmatter is not a mapping.`);
   return frontmatter;
 }
 
-function readInstallTarget(skillFile: string, frontmatter: string): InstallTarget {
-  const lines = frontmatter.split(/\r?\n/);
-  let value: string | undefined;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!line || !/^metadata:\s*$/.test(line)) continue;
-    for (index += 1; index < lines.length; index += 1) {
-      const nestedLine = lines[index];
-      if (nestedLine === undefined || !/^(?:\s|$)/.test(nestedLine)) break;
-      const match = nestedLine.match(/^\s{2}install-targets:\s*(.*?)\s*$/);
-      if (match?.[1] !== undefined) value = stripYamlQuotes(match[1]);
-    }
-    break;
-  }
-
+function readInstallTarget(skillFile: string, frontmatter: Record<string, unknown>): InstallTarget {
+  const value = isObject(frontmatter.metadata) ? frontmatter.metadata["install-targets"] : undefined;
   if (value === undefined || value === "claude-code codex") return "shared";
   if (value === "claude-code") return "claude";
   if (value === "codex") return "codex";
   throw new Error(`${skillFile}: invalid metadata.install-targets: ${JSON.stringify(value)}`);
 }
 
-function validateFrontmatterName(skillFile: string, directoryName: string, frontmatter: string): void {
-  for (const line of frontmatter.split(/\r?\n/)) {
-    const match = line.match(/^name:\s*(.*?)\s*$/);
-    if (match?.[1] === undefined) continue;
-    const value = stripYamlQuotes(match[1]);
-    if (value !== directoryName) {
-      throw new Error(`${skillFile}: frontmatter name "${value}" does not match directory "${directoryName}"`);
-    }
-    return;
-  }
-}
-
-function stripYamlQuotes(value: string): string {
-  if (
-    value.length >= 2 &&
-    ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
+function validateFrontmatterName(skillFile: string, directoryName: string, frontmatter: Record<string, unknown>): void {
+  if (frontmatter.name === undefined || String(frontmatter.name) === directoryName) return;
+  throw new Error(
+    `${skillFile}: frontmatter name "${String(frontmatter.name)}" does not match directory "${directoryName}"`,
+  );
 }
 
 function readCliLock(): CliLock {
@@ -324,8 +331,20 @@ function inspectLockEntry(skill: SourceSkill, entry: unknown, drifts: Drift[]): 
     return;
   }
 
+  // The CLI records the GitHub tree SHA, or its SHA-256 folder hash when the GitHub tree API is unavailable.
+  const folderHash = entry.skillFolderHash;
+  if (folderHash !== skill.treeHash && folderHash !== skillFolderSha256(skill)) {
+    addDrift(
+      drifts,
+      skill.name,
+      "lock",
+      "lock-skill-folder-hash",
+      lockPath,
+      `skillFolderHash is ${JSON.stringify(folderHash ?? null)}, expected ${JSON.stringify(skill.treeHash)}`,
+    );
+  }
+
   const expected = {
-    skillFolderHash: skill.treeHash,
     skillPath: `skills/${skill.name}/SKILL.md`,
     source: repository,
     sourceType: "github",
@@ -585,6 +604,17 @@ function hashIndexedTree(root: string, tree: IndexedTree): Buffer {
   return hashGitObject("tree", body);
 }
 
+// Mirrors skills CLI computeSkillFolderHash: regular files only, localeCompare order, path then content.
+function skillFolderSha256(skill: SourceSkill): string {
+  const hash = createHash("sha256");
+  const files = [...skill.snapshot].filter(([, entry]) => entry.type === "file").map(([relativePath]) => relativePath);
+  for (const relativePath of files.sort((left, right) => left.localeCompare(right))) {
+    hash.update(relativePath);
+    hash.update(fs.readFileSync(path.join(skill.root, relativePath)));
+  }
+  return hash.digest("hex");
+}
+
 function hashGitObject(type: "blob" | "tree", body: Buffer): Buffer {
   return createHash("sha1").update(`${type} ${body.length}\0`).update(body).digest();
 }
@@ -634,14 +664,14 @@ function buildCommands(groups: Groups): Array<{ args: string[]; label: string }>
   const commands: Array<{ args: string[]; label: string }> = [];
   if (groups.remove.length > 0) {
     commands.push({
-      args: ["skills", "remove", "--global", "--skill", ...groups.remove, "--yes"],
+      args: [skillsCli, "remove", "--global", "--skill", ...groups.remove, "--yes"],
       label: `remove: ${groups.remove.join(", ")}`,
     });
   }
   if (groups.shared.length > 0) {
     commands.push({
       args: [
-        "skills",
+        skillsCli,
         "add",
         repository,
         "--global",
@@ -657,13 +687,13 @@ function buildCommands(groups: Groups): Array<{ args: string[]; label: string }>
   }
   if (groups.claude.length > 0) {
     commands.push({
-      args: ["skills", "add", repository, "--global", "--agent", "claude-code", "--skill", ...groups.claude, "--yes"],
+      args: [skillsCli, "add", repository, "--global", "--agent", "claude-code", "--skill", ...groups.claude, "--yes"],
       label: `claude: ${groups.claude.join(", ")}`,
     });
   }
   if (groups.codex.length > 0) {
     commands.push({
-      args: ["skills", "add", repository, "--global", "--agent", "codex", "--skill", ...groups.codex, "--yes"],
+      args: [skillsCli, "add", repository, "--global", "--agent", "codex", "--skill", ...groups.codex, "--yes"],
       label: `codex: ${groups.codex.join(", ")}`,
     });
   }
@@ -844,12 +874,7 @@ function buildRepoClaims(plan: Plan): RepoClaim[] {
     }
   }
 
-  const roots = [...perRoot.keys()].sort();
-  const preferredRoot =
-    plan.groups.shared.length > 0 || plan.groups.codex.length > 0 ? config.agentsRoot : config.claudeRoot;
-  const canonicalRoot = perRoot.has(preferredRoot) ? preferredRoot : roots[0];
-  return roots.map((root) => ({
-    canonical: root === canonicalRoot,
+  return [...perRoot.keys()].sort().map((root) => ({
     paths: [...perRoot.get(root)!.entries()]
       .sort(([left], [right]) => compareNames(left, right))
       .map(([claimPath, scope]) => ({ path: claimPath, scope })),
@@ -857,7 +882,7 @@ function buildRepoClaims(plan: Plan): RepoClaim[] {
   }));
 }
 
-function printPlan(plan: Plan, json: boolean, filters: string[]): void {
+function printPlan(plan: Plan, json: boolean, filters: string[], head?: string): void {
   const driftSkills = [...new Set(plan.drifts.map((drift) => drift.skill))].sort();
   if (json) {
     console.log(
@@ -868,7 +893,7 @@ function printPlan(plan: Plan, json: boolean, filters: string[]): void {
           drifts: plan.drifts,
           filters,
           groups: plan.groups,
-          head: git(["rev-parse", "HEAD"]),
+          head: head ?? git(["rev-parse", "HEAD"]),
           repos: buildRepoClaims(plan),
           selectedCount: plan.selected.length,
           version: 2,

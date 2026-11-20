@@ -11,7 +11,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSPECTOR = REPO_ROOT / "skills/agents-introspection/scripts/transcript-inspect.py"
 
@@ -86,6 +85,66 @@ class TranscriptInspectTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_explicit_guardian_inspection_surfaces_lineage_and_redacts_body(self) -> None:
+        path = self.root / "guardian.jsonl"
+        metadata = session_meta("guardian", "/repo")
+        metadata["payload"].update(
+            {
+                "source": {"subagent": {"other": "guardian"}},
+                "thread_source": "subagent",
+                "parent_thread_id": "parent-session",
+            }
+        )
+        write_jsonl(path, [metadata, message_record("user", "copied history user@example.com")])
+
+        digest = run_inspector([path])["files"][0]
+        self.assertIsNone(digest["error"])
+        self.assertEqual(digest["header"]["session_kind"], "guardian")
+        self.assertEqual(digest["header"]["parent_session_id"], "parent-session")
+        self.assertEqual(digest["header"]["cwd"], "/repo")
+        self.assertEqual(digest["entries"][0]["text"], "copied history <email>")
+        text = run_inspector([path], output_format="text")
+        self.assertIn("kind=guardian parent=parent-session", text)
+        self.assertNotIn("user@example.com", text)
+
+    def test_codex_primary_subagent_and_unknown_headers(self) -> None:
+        cases = [
+            ({"source": "cli", "thread_source": "user"}, "primary", None),
+            ({"source": "vscode"}, "primary", None),
+            ({"thread_source": "subagent", "parent_thread_id": "parent"}, "subagent", "parent"),
+            ({"source": "future-source"}, "unknown", None),
+            ({}, "unknown", None),
+        ]
+        for fields, kind, parent in cases:
+            with self.subTest(fields=fields):
+                path = self.root / "session.jsonl"
+                metadata = session_meta("session", "/repo")
+                metadata["payload"].update(fields)
+                write_jsonl(path, [metadata, message_record("user", "hello")])
+                header = run_inspector([path])["files"][0]["header"]
+                self.assertEqual(header["session_kind"], kind)
+                self.assertEqual(header["parent_session_id"], parent)
+        write_jsonl(path, [message_record("user", "no metadata")])
+        self.assertEqual(run_inspector([path])["files"][0]["header"]["session_kind"], "unknown")
+
+    def test_claude_sidechain_does_not_invent_parent_session(self) -> None:
+        for marker, kind in ((True, "subagent"), (False, "primary"), (None, "unknown")):
+            with self.subTest(marker=marker):
+                path = self.root / "claude.jsonl"
+                record = {
+                    "type": "user",
+                    "sessionId": "claude",
+                    "cwd": "/repo",
+                    "parentUuid": "message-id",
+                    "message": {"role": "user", "content": "hello"},
+                }
+                if marker is not None:
+                    record["isSidechain"] = marker
+                write_jsonl(path, [record])
+                header = run_inspector([path])["files"][0]["header"]
+                self.assertEqual(header["session_kind"], kind)
+                self.assertIsNone(header["parent_session_id"])
+
     def test_user_messages_have_correct_line_numbers_and_context_is_excluded(self) -> None:
         path = self.root / "session.jsonl"
         records = [
@@ -143,6 +202,22 @@ class TranscriptInspectTests(unittest.TestCase):
 
         assistant_texts = {entry["text"] for entry in entries if entry["channel"] == "assistant"}
         self.assertEqual(assistant_texts, {"found the needle here", "also matched via haystack alternative"})
+
+    def test_keyword_filtering_matches_regular_inflections(self) -> None:
+        path = self.root / "session.jsonl"
+        records = [
+            session_meta("s1", "/repo"),
+            message_record("user", "please look into this"),
+            message_record("assistant", "I am overwriting the config now"),
+            message_record("assistant", "unrelated reply about something else"),
+        ]
+        write_jsonl(path, records)
+
+        report = run_inspector([path], keywords=["overwrite"])
+        entries = report["files"][0]["entries"]
+
+        assistant_texts = {entry["text"] for entry in entries if entry["channel"] == "assistant"}
+        self.assertEqual(assistant_texts, {"I am overwriting the config now"})
 
     def test_tool_failure_entry_reports_status_and_snippet(self) -> None:
         path = self.root / "session.jsonl"
@@ -202,11 +277,11 @@ class TranscriptInspectTests(unittest.TestCase):
 
         self.assertTrue(all(entry["error"] for entry in report["files"]))
 
-    def test_max_entries_caps_output_and_reports_omitted_count(self) -> None:
+    def test_entry_count_and_text_length_are_capped(self) -> None:
         path = self.root / "session.jsonl"
         records = [session_meta("s1", "/repo")]
         for index in range(10):
-            records.append(message_record("user", f"user message {index}"))
+            records.append(message_record("user", f"user message {index} " + "word " * 100))
         write_jsonl(path, records)
 
         report = run_inspector([path], max_entries=3)
@@ -214,6 +289,8 @@ class TranscriptInspectTests(unittest.TestCase):
 
         self.assertEqual(len(file_digest["entries"]), 3)
         self.assertEqual(file_digest["omitted_entries"], 7)
+        self.assertTrue(all(len(entry["text"]) <= 240 for entry in file_digest["entries"]))
+        self.assertTrue(file_digest["entries"][0]["text"].endswith("..."))
 
     def test_text_format_smoke(self) -> None:
         path = self.root / "session.jsonl"

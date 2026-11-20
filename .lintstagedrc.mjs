@@ -2,12 +2,11 @@
  * @type {import("lint-staged").Configuration}
  */
 export default {
-  "*": "bash -c 'just evm-atlas-check' --",
-  "{skills/*/scripts/*.sh,tests/**/*.sh,tests/**/*.bats}": "shellcheck",
+  "{scripts/generate-evm-atlas.ts,skills/evm-atlas/references/atlas-overlays.json,skills/evm-atlas/references/generated/**,skills/evm-atlas/scripts/resolve-chain.sh,.prettierrc.yml,bun.lock}":
+    "bash -c 'just evm-atlas-check' --",
+  "{mcp/*.sh,skills/*/scripts/*.sh,tests/**/*.sh,tests/**/*.bats}": "shellcheck",
+  "**/*.py": "just python-check",
   "**/*.{md,json,jsonc,yaml,yml}":
     "bunx --no-install prettier --write --cache --cache-location .cache/prettier/.prettier-cache --log-level warn",
-  "skills/*/{SKILL.md,agents/openai.yaml}": "bash -c 'just skill-invocation-check' --",
-  "{skills/*/SKILL.md,skills/skill-doctor/scripts/skill-doctor.py,tests/skill-doctor/**/*.py}":
-    "bash -c 'just skill-dependencies-check' --",
-  "scripts/sync-invocation-policy.ts": "bash -c 'just skill-invocation-check' --",
+  "{skills/**/{SKILL.md,agents/openai.yaml},README.md}": "bash -c 'just skill-check' --",
 };

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import sys
 import unittest
 from pathlib import Path
-
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "skills" / "evm-atlas" / "scripts" / "sweep-core.py"
@@ -85,6 +86,49 @@ def responses(plan: dict, rows_by_provider: dict[str, dict[str, list[dict]]] | N
 
 
 class SweepCoreTests(unittest.TestCase):
+    def test_etherscan_retirement_uses_execution_time_and_canonical_chain_id(self) -> None:
+        request = spec()
+        request["chain"] = {"id": 2741, "name": "Abstract", "accountActivityModel": "native-account-abstraction"}
+        request["providers"][0]["kind"] = "etherscan"
+        before = dt.datetime(2026, 11, 29, 23, 59, 59, tzinfo=dt.UTC)
+        plan = MODULE.build_plan(request, now=before)
+        self.assertEqual(len(plan["requests"]["history"]), 5)
+        for execution_time in (
+            dt.datetime(2026, 11, 30, tzinfo=dt.UTC),
+            dt.datetime(2026, 12, 1, tzinfo=dt.UTC),
+            dt.datetime(2026, 11, 30, 2, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+        ):
+            with self.subTest(now=execution_time), self.assertRaisesRegex(MODULE.SweepError, "unsupported.*2026-11-30"):
+                MODULE.build_plan(request, now=execution_time)
+        # A historical requestedAt/observedAt and an omitted caller cutoff cannot restore current API access.
+        execution_time = dt.datetime(2026, 12, 1, tzinfo=dt.UTC)
+        with patch.object(MODULE.dt, "datetime", wraps=dt.datetime) as clock:
+            clock.now.return_value = execution_time
+            with self.assertRaisesRegex(MODULE.SweepError, "unsupported.*2026-11-30"):
+                MODULE.build_plan(request)
+            clock.now.assert_called_once_with(dt.UTC)
+        # Evaluation of saved evidence does not perform a current-provider access check.
+        with patch.object(MODULE.dt, "datetime", wraps=dt.datetime) as clock:
+            clock.now.return_value = execution_time
+            self.assertEqual(MODULE.evaluate(plan, responses(plan))["result"], "negative")
+            clock.now.assert_not_called()
+
+    def test_retirement_does_not_disable_other_chains_or_native_indexers(self) -> None:
+        execution_time = dt.datetime(2026, 12, 1, tzinfo=dt.UTC)
+        request = spec()
+        request["providers"][0]["kind"] = "etherscan"
+        self.assertTrue(MODULE.build_plan(request, now=execution_time)["requests"]["history"])
+        request["chain"] = {"id": 2741, "name": "Abstract", "accountActivityModel": "native-account-abstraction"}
+        request["providers"][0]["kind"] = "native-explorer"
+        request["providers"][0]["capabilities"] = ["txlist", "tokentx", "tokennfttx"]
+        plan = MODULE.build_plan(request, now=execution_time)
+        payload = responses(plan)
+        for channel in ("txlistinternal", "token1155tx"):
+            del payload["providers"]["p1"]["channels"][channel]
+        self.assertEqual(MODULE.evaluate(plan, payload)["result"], "unknown")
+        payload["providers"] = {}
+        self.assertEqual(MODULE.evaluate(plan, payload)["result"], "unknown")
+
     def test_plan_is_credential_free_and_profile_specific(self) -> None:
         plan = MODULE.build_plan(spec())
         self.assertEqual(plan["requiredChannels"][-1], "token1155tx")
@@ -116,15 +160,24 @@ class SweepCoreTests(unittest.TestCase):
         ineligible = responses(ineligible_plan)
         del ineligible["providers"]["p1"]["channels"]["txlist"]
         self.assertEqual(MODULE.evaluate(ineligible_plan, ineligible)["result"], "unknown")
+        native_plan = MODULE.build_plan(spec("bootstrap-discovery", model="native-account-abstraction"))
+        native_payload = responses(native_plan)
+        del native_payload["providers"]["p1"]["channels"]["txlistinternal"]
+        self.assertEqual(MODULE.evaluate(native_plan, native_payload)["result"], "unknown")
 
     def test_bootstrap_filters_failed_and_noise_rows(self) -> None:
         plan = MODULE.build_plan(spec("bootstrap-discovery", model="unknown"))
         payload = responses(
             plan,
-            {"p1": {
-                "txlist": [row("txlist", value="0", **{"from": "0x" + "b" * 40}), row("txlist", value="5", isError="1")],
-                "txlistinternal": [row("txlistinternal", value="0")],
-            }},
+            {
+                "p1": {
+                    "txlist": [
+                        row("txlist", value="0", **{"from": "0x" + "b" * 40}),
+                        row("txlist", value="5", isError="1"),
+                    ],
+                    "txlistinternal": [row("txlistinternal", value="0")],
+                }
+            },
         )
         self.assertEqual(MODULE.evaluate(plan, payload)["result"], "negative")
 
@@ -140,6 +193,10 @@ class SweepCoreTests(unittest.TestCase):
         post_result = MODULE.evaluate(plan, post_cutoff)
         self.assertEqual(post_result["result"], "unknown")
         self.assertTrue(any("post-checkpoint" in gap["reason"] for gap in post_result["gaps"]))
+        null_hash = responses(plan)
+        null_hash["state"]["nonce"]["blockHash"] = None
+        null_result = MODULE.evaluate(plan, null_hash)
+        self.assertTrue(any("not bound to the checkpoint" in gap["reason"] for gap in null_result["gaps"]))
 
     def test_quorum_agreement_and_disagreement(self) -> None:
         plan = MODULE.build_plan(spec(quorum=2, providers=2))
@@ -147,7 +204,9 @@ class SweepCoreTests(unittest.TestCase):
         agreed = MODULE.evaluate(plan, agree)
         self.assertEqual(agreed["result"], "positive")
         self.assertTrue(agreed["quorum"]["agreement"])
-        disagree = responses(plan, {"p1": {"tokentx": [row("tokentx", TX_A)]}, "p2": {"tokentx": [row("tokentx", TX_B)]}})
+        disagree = responses(
+            plan, {"p1": {"tokentx": [row("tokentx", TX_A)]}, "p2": {"tokentx": [row("tokentx", TX_B)]}}
+        )
         disagreed = MODULE.evaluate(plan, disagree)
         self.assertEqual(disagreed["result"], "unknown")
         self.assertFalse(disagreed["quorum"]["agreement"])

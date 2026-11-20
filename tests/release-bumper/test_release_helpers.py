@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "skills" / "release-bumper" / "scripts"
 PLANNER = SCRIPTS / "plan-release.ts"
@@ -44,9 +43,7 @@ def discovery(*, beta: bool = False) -> dict:
         "explicitVersion": None,
         "packages": packages,
         "targets": [packages[0]],
-        "dependencyEdges": [
-            {"from": "b", "to": "a", "type": "dependencies", "name": "@scope/a", "range": "^1.2.3"}
-        ],
+        "dependencyEdges": [{"from": "b", "to": "a", "type": "dependencies", "name": "@scope/a", "range": "^1.2.3"}],
         "previousTags": {},
     }
 
@@ -92,6 +89,31 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual([package["id"] for package in payload["packages"]], ["packages/app"])
             self.assertTrue(payload["needsSelection"])
 
+    def test_git_discovery_finds_nested_packages_and_skips_ignored_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            git(repo, "init", "-q", "-b", "main")
+            git(repo, "config", "user.name", "Test")
+            git(repo, "config", "user.email", "test@example.com")
+            (repo / "package.json").write_text('{"name":"root","workspaces":["packages/**"]}\n')
+            manifests = {
+                "packages/a": "a",
+                "packages/group/b": "b",
+                "packages/node_modules/vendored": "vendored",
+            }
+            for rel, name in manifests.items():
+                (repo / rel).mkdir(parents=True)
+                (repo / rel / "package.json").write_text(f'{{"name":"{name}","version":"1.0.0"}}\n')
+            git(repo, "add", "package.json", "packages/a", "packages/node_modules")
+            git(repo, "commit", "-qm", "initial")
+            # packages/group/b stays untracked; git discovery must still include it.
+
+            result = subprocess.run(
+                ["bun", "run", str(PLANNER), "--cwd", str(repo)], check=True, text=True, capture_output=True
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual([package["id"] for package in payload["packages"]], ["packages/a", "packages/group/b"])
+
     def test_changed_files_are_complete_and_hints_are_not_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -118,6 +140,17 @@ class PlannerTests(unittest.TestCase):
             self.assertNotIn("includedFiles", payload)
             self.assertNotIn("excludedFiles", payload)
             self.assertFalse(payload["changeHints"]["authoritative"])
+
+            git(repo, "tag", "v1.0.1-rc-1")
+            result = subprocess.run(
+                ["bun", "run", str(PLANNER), "--cwd", str(repo), "--version", "1.0.1-rc-2"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["errors"], [])
+            self.assertEqual(payload["previousTags"]["demo"]["tag"], "v1.0.1-rc-1")
 
 
 class FinalizerTests(unittest.TestCase):
@@ -147,8 +180,10 @@ class FinalizerTests(unittest.TestCase):
         self.assertIsNone(by_range[">=1 <2"]["satisfied"])
         self.assertEqual(by_range["workspace:^1.2.3"]["suggestedRange"], "workspace:^2.0.0")
         self.assertFalse(finalizer.satisfies("2.0.0-beta.1", "^2.0.0"))
+        self.assertIn({"package": "b", "decision": "choose dependent release version"}, result["unresolvedDecisions"])
         cascaded = finalizer.finalize(payload, ["a=2.0.0", "b=2.0.1"])
         self.assertEqual(cascaded["versions"]["b"]["planned"], "2.0.1")
+        self.assertEqual(cascaded["unresolvedDecisions"], [])
 
     def test_cycles_are_reported_without_failing(self) -> None:
         payload = discovery()
@@ -183,6 +218,34 @@ class ChangelogTests(unittest.TestCase):
         self.assertTrue(any("repeat" in error or "order" in error for error in errors))
         self.assertTrue(validator.validate(text, "2.0.0", "2026-07-22", "release-2.0.0"))
         self.assertTrue(validator.validate(text.replace("[2.0.0]", "2.0.0", 1), "2.0.0", "2026-07-22", None))
+        compare = text.replace("releases/tag/v2.0.0", "compare/v1.0.0...v2.0.0", 1)
+        self.assertEqual(validator.validate(compare, "2.0.0", "2026-07-22", "v2.0.0"), [])
+        self.assertEqual(validator.validate(compare, "2.0.0", "2026-07-22", None), [])
+        self.assertTrue(validator.validate(compare, "2.0.0", "2026-07-22", "v2.0.1"))
+
+    def test_accepts_wrapped_items_and_rejects_nested_lists(self) -> None:
+        text = """# Changelog
+
+## [2.0.0] - 2026-07-22
+
+### Changed
+
+- **Breaking:** Change the runtime contract so that this long entry wraps onto
+  a continuation line ([`abc1234`](https://github.com/acme/demo/commit/abc1234))
+
+[2.0.0]: https://github.com/acme/demo/releases/tag/v2.0.0
+"""
+        self.assertEqual(validator.validate(text, "2.0.0", "2026-07-22", "v2.0.0"), [])
+        nested = text.replace("  a continuation", "  - a nested item", 1)
+        self.assertIn(
+            "category Changed contains a nested list item",
+            validator.validate(nested, "2.0.0", "2026-07-22", "v2.0.0"),
+        )
+        orphan = text.replace("- **Breaking:**", "  **Breaking:**", 1)
+        self.assertIn(
+            "category Changed contains non-list content",
+            validator.validate(orphan, "2.0.0", "2026-07-22", "v2.0.0"),
+        )
 
 
 if __name__ == "__main__":
